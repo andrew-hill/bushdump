@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Captured media — never commit camera dumps
+/dump/
+/downloads/
+*.jpg
+*.jpeg
+*.mp4
+*.avi
+
+# Local config & sync state (may contain WiFi password / watermarks)
+config.toml
+state.json
+*.local.toml
+
+# macOS
+.DS_Store
