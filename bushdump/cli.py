@@ -11,11 +11,13 @@ import asyncio
 import datetime
 import sys
 import time
+import traceback
 from typing import IO
 
 from bushdump import __version__, config, sync
 
 MEDIA_TYPES = ("Photo", "Video")
+_MEDIA_TYPE_CODE = {"Photo": 1, "Video": 2}
 
 # Set by cmd_sync before calling into _sync_one/_wake_and_report; reset after.
 _log_file: IO[str] | None = None
@@ -71,6 +73,9 @@ def _wake_join(cam: config.Camera) -> None:
     """BLE-wake then WiFi-join a camera (shared by stats/ls)."""
     from bushdump import wifi
 
+    if cam.ssid and wifi.current_ssid() == cam.ssid:
+        print(f"Already on '{cam.ssid}' — skipping wake+join.")
+        return
     if cam.ble_address:
         _wake_and_report(cam.ble_address, cam.name)
     else:
@@ -103,12 +108,15 @@ def cmd_stats(args: argparse.Namespace) -> int:
         if not client.wait_until_ready():
             print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
             return 1
+        print("Camera ready.")
         s = client.stats()
-    sd_pct = round(s.sd_used_mb / s.sd_total_mb * 100) if s.sd_total_mb else 0
+    sd_pct = round(s.sd_used_kb / s.sd_total_kb * 100) if s.sd_total_kb else 0
+    sd_used_gb = s.sd_used_kb / (1024 * 1024)
+    sd_total_gb = s.sd_total_kb / (1024 * 1024)
     ext = "  (ext power)" if s.ext_power else ""
     print(f"Battery:     {s.battery}%{ext}")
     print(f"Temperature: {s.temperature}°C")
-    print(f"SD card:     {s.sd_used_mb} / {s.sd_total_mb} MB used ({sd_pct}%)")
+    print(f"SD card:     {sd_used_gb:.1f} / {sd_total_gb:.1f} GB used ({sd_pct}%)")
     print(f"Files:       {s.photo_count} photos, {s.video_count} videos")
     return 0
 
@@ -125,13 +133,16 @@ def cmd_ls(args: argparse.Namespace) -> int:
         if not client.wait_until_ready():
             print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
             return 1
+        print("Camera ready.")
         state = config.load_state()
         cam_state = state.get(cam.name, {})
+        all_files = client.list_all_files()
         total = 0
         pending = 0
         for media in MEDIA_TYPES:
+            type_code = _MEDIA_TYPE_CODE[media]
             watermark = cam_state.get(media)
-            available = list(client.iter_files(media))
+            available = [f for f in all_files if f.type == type_code]
             to_dl = {f.id for f in sync.files_to_download(available, watermark)}
             for f in available:
                 marker = "*" if f.id in to_dl else " "
@@ -156,7 +167,7 @@ def cmd_keepalive(args: argparse.Namespace) -> int:
         if not client.wait_until_ready():
             print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
             return 1
-        print(f"Keeping camera alive every {args.interval:.0f}s. Ctrl+C to stop.")
+        print(f"Camera ready — keeping alive every {args.interval:.0f}s. Ctrl+C to stop.")
         try:
             while True:
                 time.sleep(args.interval)
@@ -204,8 +215,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
         state = config.load_state()
         total = 0
         for cam in cameras:
-            total += _sync_one(cam, state, args)
-            config.save_state(state)
+            try:
+                total += _sync_one(cam, state, args)
+            except KeyboardInterrupt:
+                _out("\nInterrupted — progress saved.", err=True)
+                return 1
+            except Exception:
+                _out(traceback.format_exc(), err=True)
+                raise
 
         _out(f"\nDone — {total} new file(s).")
         _out("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
@@ -223,15 +240,15 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> int:
 
     _out(f"\n=== {cam.name} ===")
 
-    if not args.manual_wifi:
+    if args.manual_wifi:
+        input(f"Join WiFi '{cam.ssid}' (password: {cam.password}), then press Enter...")
+    elif cam.ssid and wifi.current_ssid() == cam.ssid:
+        _out(f"Already on '{cam.ssid}' — skipping wake+join.")
+    else:
         if cam.ble_address:
             _wake_and_report(cam.ble_address, cam.name)
         else:
             _out("No BLE address configured — skipping wake (turn WiFi on yourself).")
-
-    if args.manual_wifi:
-        input(f"Join WiFi '{cam.ssid}' (password: {cam.password}), then press Enter...")
-    else:
         _out(f"Joining WiFi '{cam.ssid}'...")
         wifi.join(cam.ssid, cam.password)
 
@@ -241,28 +258,31 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> int:
         if not client.wait_until_ready():
             _out(f"  {cam.name}: camera did not respond over HTTP — skipping.", err=True)
             return 0
+        _out("Camera ready.")
 
         cam_state = state.setdefault(cam.name, {})
         last_alive = time.monotonic()
+        all_files = client.list_all_files()
         for media in MEDIA_TYPES:
+            type_code = _MEDIA_TYPE_CODE[media]
             watermark = cam_state.get(media)
-            available = list(client.iter_files(media))
+            available = [f for f in all_files if f.type == type_code]
             todo = sync.files_to_download(available, watermark)
             _out(f"{media}: {len(todo)} new of {len(available)}")
-            fetched = []
             for f in todo:
                 now = time.monotonic()
                 if now - last_alive > 15:
                     ok = client.keep_alive()
                     last_alive = now
                     _vout(f"  [keep-alive → {'ok' if ok else 'failed'}]")
-                client.download(f, cam.output_dir)
-                fetched.append(f)
-                downloaded_count += 1
-                _out(f"  ↓ {f.name}")
-            new_watermark = sync.next_watermark(fetched, watermark)
-            if new_watermark is not None:
-                cam_state[media] = new_watermark
+                was_downloaded = client.download(f, cam.output_dir)
+                if was_downloaded:
+                    downloaded_count += 1
+                    _out(f"  ↓ {f.name}")
+                else:
+                    _vout(f"  = {f.name}  (already on disk)")
+                cam_state[media] = f.id
+                config.save_state(state)
 
         if not args.keep_awake:
             client.power_off()

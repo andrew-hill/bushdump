@@ -7,7 +7,6 @@ HTTP on its own WiFi AP (default 192.168.8.1:8080).
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,9 +14,6 @@ from pathlib import Path
 # (CameraFile, parse_file_page) and the sync logic stay importable without it.
 
 DEFAULT_HOST = "192.168.8.1:8080"
-MediaType = str  # "Photo" | "Video"
-
-_MEDIA_TYPE_CODE = {"Photo": 1, "Video": 2}
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +50,8 @@ class CameraStats:
     battery: int  # percent 0–100
     temperature: int  # celsius
     ext_power: bool
-    sd_total_mb: int
-    sd_used_mb: int
+    sd_total_kb: int  # API returns KB
+    sd_used_kb: int  # API returns KB
     photo_count: int
     video_count: int
 
@@ -73,7 +69,7 @@ def parse_info2(data: object) -> tuple[int, int, bool]:
 
 
 def parse_info3(data: object) -> tuple[int, int, int, int]:
-    """Parse /cmd/info/3 → (sd_total_mb, sd_used_mb, photo_count, video_count). Best-effort."""
+    """Parse /cmd/info/3 → (sd_total_kb, sd_used_kb, photo_count, video_count). Best-effort."""
     if not isinstance(data, dict):
         return 0, 0, 0, 0
     d = data.get("data") or {}
@@ -110,6 +106,7 @@ class CameraClient:
         import httpx
 
         self.host = host
+        self._timeout = timeout
         self.base_url = f"http://{host}"
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
 
@@ -151,46 +148,62 @@ class CameraClient:
 
     # --- API calls ---------------------------------------------------------
 
-    def iter_files(self, media_type: MediaType) -> Iterator[CameraFile]:
-        """Yield every file of a type, walking pages until one comes back empty."""
-        type_code = _MEDIA_TYPE_CODE[media_type]
+    def list_all_files(self) -> list[CameraFile]:
+        """Fetch all files on the camera in one paginated scan."""
+        files: list[CameraFile] = []
         from_id = 0
         while True:
             resp = self._client.get(f"/list/detail/forward/{from_id}/50")
             resp.raise_for_status()
-            all_files = parse_file_page(resp.json())
-            if not all_files:
-                return
-            yield from (f for f in all_files if f.type == type_code)
-            from_id = all_files[-1].id
+            page = parse_file_page(resp.json())
+            if not page:
+                break
+            files.extend(page)
+            from_id = page[-1].id
+        return files
 
-    def download(self, file: CameraFile, dest_dir: Path) -> Path:
-        """Stream a file to dest_dir. Skips if a same-size copy already exists."""
+    def download(self, file: CameraFile, dest_dir: Path) -> bool:
+        """Stream a file to dest_dir. Returns True if downloaded, False if already complete.
+
+        Retries once on a fresh connection if the camera dropped the persistent
+        connection after the previous response (RemoteProtocolError).
+        """
+        import httpx
+
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / file.name
         if dest.exists() and dest.stat().st_size == file.size:
-            return dest
+            return False
         tmp = dest.with_suffix(dest.suffix + ".part")
-        with self._client.stream("GET", f"/file/{file.id}/{file.kind}") as resp:
-            resp.raise_for_status()
-            with tmp.open("wb") as fh:
-                for chunk in resp.iter_bytes():
-                    fh.write(chunk)
+        for attempt in range(2):
+            try:
+                with self._client.stream("GET", f"/file/{file.id}/{file.kind}") as resp:
+                    resp.raise_for_status()
+                    with tmp.open("wb") as fh:
+                        for chunk in resp.iter_bytes():
+                            fh.write(chunk)
+                break
+            except httpx.RemoteProtocolError:
+                if attempt == 1:
+                    raise
+                tmp.unlink(missing_ok=True)
+                self._client.close()
+                self._client = httpx.Client(base_url=self.base_url, timeout=self._timeout)
         tmp.replace(dest)
-        return dest
+        return True
 
     def stats(self) -> CameraStats:
         """Fetch camera health: battery, SD usage, file counts."""
         battery, temperature, ext_power = parse_info2(self._client.get("/cmd/info/2").json())
-        sd_total_mb, sd_used_mb, photo_count, video_count = parse_info3(
+        sd_total_kb, sd_used_kb, photo_count, video_count = parse_info3(
             self._client.get("/cmd/info/3").json()
         )
         return CameraStats(
             battery=battery,
             temperature=temperature,
             ext_power=ext_power,
-            sd_total_mb=sd_total_mb,
-            sd_used_mb=sd_used_mb,
+            sd_total_kb=sd_total_kb,
+            sd_used_kb=sd_used_kb,
             photo_count=photo_count,
             video_count=video_count,
         )

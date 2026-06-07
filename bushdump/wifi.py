@@ -113,6 +113,24 @@ def find_wifi_interface() -> str:
     return iface
 
 
+def current_ssid(interface: str | None = None) -> str | None:
+    """Return the SSID the machine is currently connected to, or None."""
+    try:
+        iface = interface or find_wifi_interface()
+        result = subprocess.run(
+            ["networksetup", "-getairportnetwork", iface],
+            capture_output=True,
+            text=True,
+        )
+        line = result.stdout.strip()
+        prefix = "Current Wi-Fi Network: "
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    except Exception:
+        pass
+    return None
+
+
 def join(
     ssid: str,
     password: str,
