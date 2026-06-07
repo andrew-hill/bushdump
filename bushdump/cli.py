@@ -8,12 +8,50 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import sys
 import time
+from typing import IO
 
 from bushdump import __version__, config, sync
 
 MEDIA_TYPES = ("Photo", "Video")
+
+# Set by cmd_sync before calling into _sync_one/_wake_and_report; reset after.
+_log_file: IO[str] | None = None
+_verbose: bool = False
+
+
+def _out(msg: str = "", *, err: bool = False) -> None:
+    """Print to stdout/stderr and tee to the log file if open."""
+    print(msg, file=sys.stderr if err else sys.stdout)
+    if _log_file is not None:
+        print(msg, file=_log_file)
+
+
+def _vout(msg: str = "") -> None:
+    """Verbose line: always to log file; stdout only if --verbose."""
+    if _log_file is not None:
+        print(msg, file=_log_file)
+    if _verbose:
+        print(msg)
+
+
+def _open_log(spec: str | None) -> IO[str] | None:
+    """Open a log file from a --log argument value. None → logging disabled."""
+    if spec is None:
+        return None
+    if spec == "auto":
+        log_dir = config.CONFIG_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = log_dir / f"sync-{ts}.log"
+    else:
+        from pathlib import Path
+
+        path = Path(spec).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path.open("w", encoding="utf-8")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -39,64 +77,77 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
+    global _log_file, _verbose
     from bushdump import ble
 
-    cfg = config.load_config()
-    if not cfg.cameras:
-        print("No cameras configured. Run `bushdump add` first.", file=sys.stderr)
-        return 1
+    _verbose = args.verbose
+    log = _open_log(args.log)
+    _log_file = log
+    try:
+        if log:
+            _out(f"Logging to {log.name}")
 
-    if args.name:
-        if args.name not in cfg.cameras:
-            print(
-                f"Unknown camera {args.name!r}. Configured: {', '.join(cfg.cameras)}",
-                file=sys.stderr,
-            )
+        cfg = config.load_config()
+        if not cfg.cameras:
+            _out("No cameras configured. Run `bushdump add` first.", err=True)
             return 1
-        cameras = [cfg.cameras[args.name]]
-    else:
-        print("Scanning for nearby cameras...")
-        present = {addr for addr, _ in asyncio.run(ble.discover(timeout=args.scan_timeout))}
-        cameras = sync.cameras_present(cfg.cameras.values(), present)
-        if not cameras:
-            print(f"None of your cameras are nearby. Configured: {', '.join(cfg.cameras)}")
-            return 1
-        print(f"Found nearby: {', '.join(c.name for c in cameras)}")
 
-    state = config.load_state()
-    total = 0
-    for cam in cameras:
-        total += _sync_one(cam, state, args)
-        config.save_state(state)
+        if args.name:
+            if args.name not in cfg.cameras:
+                _out(
+                    f"Unknown camera {args.name!r}. Configured: {', '.join(cfg.cameras)}",
+                    err=True,
+                )
+                return 1
+            cameras = [cfg.cameras[args.name]]
+        else:
+            _out("Scanning for nearby cameras...")
+            present = {addr for addr, _ in asyncio.run(ble.discover(timeout=args.scan_timeout))}
+            cameras = sync.cameras_present(cfg.cameras.values(), present)
+            if not cameras:
+                _out(f"None of your cameras are nearby. Configured: {', '.join(cfg.cameras)}")
+                return 1
+            _out(f"Found nearby: {', '.join(c.name for c in cameras)}")
 
-    print(f"\nDone — {total} new file(s).")
-    print("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
-    return 0
+        state = config.load_state()
+        total = 0
+        for cam in cameras:
+            total += _sync_one(cam, state, args)
+            config.save_state(state)
+
+        _out(f"\nDone — {total} new file(s).")
+        _out("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
+        return 0
+    finally:
+        if log:
+            log.close()
+        _log_file = None
+        _verbose = False
 
 
 def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> int:
     from bushdump import wifi
     from bushdump.camera import CameraClient
 
-    print(f"\n=== {cam.name} ===")
+    _out(f"\n=== {cam.name} ===")
 
     if not args.manual_wifi:
         if cam.ble_address:
             _wake_and_report(cam.ble_address, cam.name)
         else:
-            print("No BLE address configured — skipping wake (turn WiFi on yourself).")
+            _out("No BLE address configured — skipping wake (turn WiFi on yourself).")
 
     if args.manual_wifi:
         input(f"Join WiFi '{cam.ssid}' (password: {cam.password}), then press Enter...")
     else:
-        print(f"Joining WiFi '{cam.ssid}'...")
+        _out(f"Joining WiFi '{cam.ssid}'...")
         wifi.join(cam.ssid, cam.password)
 
     downloaded_count = 0
     with CameraClient(cam.camera_host) as client:
-        print("Waiting for camera to respond...")
+        _out("Waiting for camera to respond...")
         if not client.wait_until_ready():
-            print(f"  {cam.name}: camera did not respond over HTTP — skipping.", file=sys.stderr)
+            _out(f"  {cam.name}: camera did not respond over HTTP — skipping.", err=True)
             return 0
 
         cam_state = state.setdefault(cam.name, {})
@@ -105,17 +156,18 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> int:
             watermark = cam_state.get(media)
             available = list(client.iter_files(media))
             todo = sync.files_to_download(available, watermark)
-            print(f"{media}: {len(todo)} new of {len(available)}")
+            _out(f"{media}: {len(todo)} new of {len(available)}")
             fetched = []
             for f in todo:
                 now = time.monotonic()
                 if now - last_alive > 15:
-                    client.keep_alive()
+                    ok = client.keep_alive()
                     last_alive = now
+                    _vout(f"  [keep-alive → {'ok' if ok else 'failed'}]")
                 client.download(f, cam.output_dir)
                 fetched.append(f)
                 downloaded_count += 1
-                print(f"  ↓ {f.name}")
+                _out(f"  ↓ {f.name}")
             new_watermark = sync.next_watermark(fetched, watermark)
             if new_watermark is not None:
                 cam_state[media] = new_watermark
@@ -197,20 +249,20 @@ def _wake_and_report(address: str, label: str) -> None:
     """Wake the camera by address, printing the camera's ack on success."""
     from bushdump import ble
 
-    print(f"Waking {label} over BLE to bring its WiFi up...")
+    _out(f"Waking {label} over BLE to bring its WiFi up...")
     try:
         reply = asyncio.run(ble.wake_wifi(address))
     except Exception as e:
-        print(f"  (BLE wake failed: {e})")
+        _out(f"  (BLE wake failed: {e})")
         return
     if reply is None:
-        print("  (camera didn't ack — the wake may not have taken effect)")
+        _out("  (camera didn't ack — the wake may not have taken effect)")
         return
     try:
         text = reply.decode("utf-8").strip()
     except UnicodeDecodeError:
         text = reply.hex()
-    print(f"  camera ack: {text!r}")
+    _out(f"  camera ack: {text!r}")
 
 
 def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
@@ -371,6 +423,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=8.0,
         help="seconds to scan for nearby cameras (default: 8)",
+    )
+    p_sync.add_argument(
+        "--log",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="FILE",
+        help="tee output to a log file (auto-named under ~/.config/bushdump/logs/ if omitted)",
+    )
+    p_sync.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show extra detail on stdout (keep-alive, etc.); always included in log",
     )
     p_sync.set_defaults(func=cmd_sync)
 

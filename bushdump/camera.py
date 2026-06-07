@@ -94,9 +94,13 @@ class CameraClient:
         except Exception:
             return False
 
-    def keep_alive(self) -> None:
+    def keep_alive(self) -> bool:
         """Ping the camera to prevent it sleeping during a long download."""
-        self._client.get("/cmd/standby/reset")
+        try:
+            resp = self._client.get("/cmd/standby/reset")
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     def wait_until_ready(self, timeout: float = 30.0, interval: float = 1.0) -> bool:
         """Poll until the camera answers HTTP, or give up after `timeout`s."""
