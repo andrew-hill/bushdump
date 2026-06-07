@@ -20,7 +20,7 @@ CONFIG_DIR = Path.home() / ".config" / "bushdump"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 STATE_PATH = CONFIG_DIR / "state.json"
 
-DEFAULT_OUTPUT_DIR = "~/Pictures/TrailCam"
+DEFAULT_OUTPUT_DIR = "~/Pictures/BushDump"
 DEFAULT_PASSWORD = "12345678"
 
 CONFIG_TEMPLATE = f"""\

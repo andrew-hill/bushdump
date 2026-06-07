@@ -11,7 +11,7 @@ def _write(path, text):
 def test_load_config_two_cameras_with_defaults(tmp_path):
     cfg_path = _write(
         tmp_path / "config.toml",
-        'output_dir = "~/Pictures/TrailCam"\n'
+        'output_dir = "~/Pictures/BushDump"\n'
         'password = "defaultpw"\n'
         'camera_host = "192.168.1.8"\n'
         "\n"

@@ -1,10 +1,10 @@
-"""WiFi on macOS: list nearby networks (CoreWLAN) and join/leave an AP.
+"""WiFi on macOS: list nearby networks (CoreWLAN) and join an AP.
 
 Listing SSIDs uses CoreWLAN, which Apple gates behind Location Services — if the
 permission isn't granted, scans come back empty and the caller falls back to
 manual SSID entry. Joining the camera's AP drops your normal WiFi (the camera AP
-has no internet); `restore` cycles the adapter so macOS rejoins your preferred
-network afterwards.
+has no internet); we don't auto-restore it — you rejoin your usual network
+yourself when you're done.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def scan_ssids(name_hint: str = "Trail Cam") -> list[str]:
 
 
 def watch_ssids(
-    seconds: float = 15.0,
+    seconds: float = 8.0,
     on_found: Callable[[str], None] | None = None,
     name_hint: str = "Trail Cam",
 ) -> list[str]:
@@ -129,11 +129,3 @@ def join(
         last_err = (result.stdout + result.stderr).strip()
         time.sleep(interval)
     raise RuntimeError(f"Failed to join {ssid!r} within {timeout:.0f}s: {last_err}")
-
-
-def restore(interface: str | None = None) -> None:
-    """Power-cycle the adapter so macOS rejoins the preferred network."""
-    iface = interface or find_wifi_interface()
-    subprocess.run(["networksetup", "-setairportpower", iface, "off"], check=False)
-    time.sleep(1)
-    subprocess.run(["networksetup", "-setairportpower", iface, "on"], check=False)

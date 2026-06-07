@@ -46,7 +46,7 @@ uv run ruff format .                 # format
 ## Project structure
 
 - `bushdump/ble.py` — BLE: `watch()` (live scan), `discover()` (snapshot), `wake_wifi()`; deps imported lazily
-- `bushdump/wifi.py` — macOS WiFi: list networks via CoreWLAN (`scan_ssids`/`watch_ssids`, Location-gated), join/restore an AP via `networksetup`
+- `bushdump/wifi.py` — macOS WiFi: list networks via CoreWLAN (`scan_ssids`/`watch_ssids`, Location-gated), join an AP via `networksetup` (no auto-restore)
 - `bushdump/camera.py` — HTTP client for `/Storage` + `/SetMode`; `httpx` imported lazily so pure helpers stay testable without it
 - `bushdump/sync.py` — pure logic: `files_to_download`/`next_watermark` (watermark) and `cameras_present` (match scanned addresses to config)
 - `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state
@@ -66,9 +66,10 @@ Each camera is a `[cameras.<name>]` section (short human name) with its own
 cameras by stored address → sync each. `sync <name>` targets one directly. Per
 camera: BLE wake → join AP (retries until up) → **poll** camera HTTP until ready
 → storage mode → per media type list+paginate, download files newer than the
-saved watermark → save watermark → power off camera WiFi. Your normal WiFi is
-restored once at the end. Races are handled by polling, not fixed sleeps.
-`--manual-wifi` swaps BLE+auto-join for a "join the AP, press Enter" prompt.
+saved watermark → save watermark → power off camera WiFi. We do **not**
+auto-restore your normal WiFi — the laptop stays on the (last) camera's AP; you
+rejoin your usual network yourself. Races are handled by polling, not fixed
+sleeps. `--manual-wifi` swaps BLE+auto-join for a "join the AP, press Enter" prompt.
 
 ## discover / wifi / add flow
 

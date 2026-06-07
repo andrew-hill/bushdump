@@ -38,7 +38,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    from bushdump import ble, wifi
+    from bushdump import ble
 
     cfg = config.load_config()
     if not cfg.cameras:
@@ -64,16 +64,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     state = config.load_state()
     total = 0
-    try:
-        for cam in cameras:
-            total += _sync_one(cam, state, args)
-            config.save_state(state)
-    finally:
-        if not args.manual_wifi and not args.no_restore:
-            print("Restoring your normal WiFi...")
-            wifi.restore()
+    for cam in cameras:
+        total += _sync_one(cam, state, args)
+        config.save_state(state)
 
     print(f"\nDone — {total} new file(s).")
+    print("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
     return 0
 
 
@@ -227,16 +223,6 @@ def _prompt_name(prompt: str) -> str | None:
         return name
 
 
-def _restore() -> None:
-    from bushdump import wifi
-
-    print("Restoring your normal WiFi...")
-    try:
-        wifi.restore()
-    except Exception as e:
-        print(f"  (couldn't restore WiFi automatically: {e})")
-
-
 def cmd_add(args: argparse.Namespace) -> int:
     from bushdump import ble, wifi
     from bushdump.camera import CameraClient
@@ -266,14 +252,12 @@ def cmd_add(args: argparse.Namespace) -> int:
         wifi.join(ssid, password)
     except Exception as e:
         print(f"Couldn't join WiFi: {e}", file=sys.stderr)
-        _restore()
         return 1
 
     with CameraClient() as client:
         print("Waiting for the camera to respond...")
         if not client.wait_until_ready():
             print("Camera didn't respond over HTTP — wrong network?", file=sys.stderr)
-            _restore()
             return 1
         client.enter_storage_mode()
         print("\nConnected: " + client.describe())
@@ -281,12 +265,10 @@ def cmd_add(args: argparse.Namespace) -> int:
     name = _prompt_name("\nEnter a short name to save this camera (blank to discard): ")
     if name is None:
         print("Discarded — nothing saved.")
-        _restore()
         return 1
 
     config.add_camera(name, ble_address=address, ssid=ssid, password=password)
     print(f"Saved '{name}'. Try it with:  ./bd sync {name}")
-    _restore()
     return 0
 
 
@@ -315,7 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_add = sub.add_parser("add", help="register a camera (guided; pick from live lists)")
     p_add.add_argument("--timeout", type=float, default=10.0, help="BLE watch seconds")
-    p_add.add_argument("--wifi-timeout", type=float, default=15.0, help="WiFi watch seconds")
+    p_add.add_argument("--wifi-timeout", type=float, default=8.0, help="WiFi watch seconds")
     p_add.set_defaults(func=cmd_add)
 
     p_sync = sub.add_parser("sync", help="download new files from nearby cameras")
@@ -329,11 +311,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-awake",
         action="store_true",
         help="don't power the camera's WiFi off when done",
-    )
-    p_sync.add_argument(
-        "--no-restore",
-        action="store_true",
-        help="don't cycle WiFi to rejoin your normal network afterwards",
     )
     p_sync.add_argument(
         "--scan-timeout",

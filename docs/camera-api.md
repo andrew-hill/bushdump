@@ -59,5 +59,27 @@ wire up `Delete` if explicitly asked.
 
 ## References
 
+### Legacy OEM (`0xFF00`/`0xFF01` BLE wake, `192.168.1.8:80` HTTP)
+
+This is what the rest of this doc describes — the early GardePro/Dsoon
+generation reverse-engineered by:
+
 - geekitguide.com/wifi-ble-trailcam-investigation-part-2
 - github.com/fearthis4/wifi-ble-trailcam-investigations
+
+### Newer Linkiing/Telink-based GardePro (E6PMB, E8 2.0 Pro, E9P, ...)
+
+Different platform — `Shenzhen Linkiing` BLE module, Nordic UART Service
+(no `0xFF00` service), gateway `192.168.8.1:8080`, WPA2 default password
+`1234567890`, BLE wake claimed as ASCII `AT+WAKEPULSE=10\r\n`. Endpoint shape
+is `/cmd/info/N`, `/cmd/getSetting`, `/cmd/setSetting`, `/cmd/standby/reset`,
+`/list/detail/forward/{from_id}/{page_size}`, `/file/{id}/{JPG|MP4}`,
+`/thumb/{id}/JPG`, `/cmd/delete/{id}/{JPG|MP4}`. These are unverified for our
+specific cameras (E6PMB, E8 2.0 Pro) — community work on related models:
+
+- github.com/vondruska/gardepro-fetcher — traffic analysis vs. GardePro E9P,
+  source of the `AT+WAKEPULSE=10` wake claim and the endpoint list
+- github.com/fede2cr/camtrap-control — independent Python client; useful for
+  cross-checking endpoint shapes and JSON conventions
+
+Neither is official; both may drift by firmware/model.
