@@ -140,16 +140,29 @@ def _sorted_devices(devices: list[tuple[str, str | None]]) -> list[tuple[str, st
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
-    from bushdump import ble, wifi
+    from bushdump import ble
 
     print(f"Watching for BLE devices for {args.timeout:.0f}s...")
     if not asyncio.run(ble.watch(args.timeout, _print_ble_found)):
         print("  (none found)")
+    return 0
 
-    print(f"\nWatching for WiFi networks for {args.wifi_timeout:.0f}s...")
+
+def cmd_wifi(args: argparse.Namespace) -> int:
+    from bushdump import ble, wifi
+
+    if args.ble_address:
+        print(f"Waking {args.ble_address} over BLE to bring its WiFi up...")
+        try:
+            asyncio.run(ble.wake_wifi(args.ble_address))
+        except Exception as e:
+            print(f"  (BLE wake failed: {e})")
+
     if not wifi.corewlan_available():
-        print("  (WiFi scan unavailable — Location permission off?)")
-    elif not wifi.watch_ssids(args.wifi_timeout, _print_wifi_found):
+        print("WiFi scan unavailable — Location permission off?", file=sys.stderr)
+        return 1
+    print(f"Watching for WiFi networks for {args.timeout:.0f}s...")
+    if not wifi.watch_ssids(args.timeout, _print_wifi_found):
         print("  (none found)")
     return 0
 
@@ -291,10 +304,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = sub.add_parser("list", help="list configured cameras")
     p_list.set_defaults(func=cmd_list)
 
-    p_discover = sub.add_parser("discover", help="list nearby BLE devices and WiFi networks")
+    p_discover = sub.add_parser("discover", help="list nearby BLE devices")
     p_discover.add_argument("--timeout", type=float, default=10.0, help="BLE watch seconds")
-    p_discover.add_argument("--wifi-timeout", type=float, default=8.0, help="WiFi watch seconds")
     p_discover.set_defaults(func=cmd_discover)
+
+    p_wifi = sub.add_parser("wifi", help="list WiFi networks (optionally wake a camera first)")
+    p_wifi.add_argument("ble_address", nargs="?", help="BLE address to wake before scanning")
+    p_wifi.add_argument("--timeout", type=float, default=8.0, help="WiFi watch seconds")
+    p_wifi.set_defaults(func=cmd_wifi)
 
     p_add = sub.add_parser("add", help="register a camera (guided; pick from live lists)")
     p_add.add_argument("--timeout", type=float, default=10.0, help="BLE watch seconds")

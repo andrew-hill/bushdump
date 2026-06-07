@@ -40,7 +40,8 @@ Then sync whenever you like:
 ```bash
 ./bd sync             # scan and sync every nearby configured camera
 ./bd sync frontgate   # sync just one
-./bd discover         # read-only: live-list nearby BLE devices + WiFi networks
+./bd discover         # read-only: live-list nearby BLE devices
+./bd wifi [ble-addr]  # live-list WiFi networks (wake a camera first if given)
 ./bd --help           # all commands and flags
 ```
 

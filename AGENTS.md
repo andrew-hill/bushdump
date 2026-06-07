@@ -29,7 +29,9 @@ generality. No service to deploy, no multi-tenancy, no scale concerns.
 ```bash
 uv sync                              # install deps into .venv (first-time setup)
 ./bd init                            # write a config template to ~/.config/bushdump
-./bd discover                        # live-list nearby BLE devices + WiFi networks
+./bd discover                        # live-list nearby BLE devices
+./bd wifi                            # live-list WiFi networks
+./bd wifi <ble-address>              # wake that camera first, then list WiFi (its AP appears)
 ./bd add                             # guided: register a camera (pick from live lists)
 ./bd list                            # show configured cameras
 ./bd sync                            # scan and sync every nearby configured camera
@@ -48,7 +50,7 @@ uv run ruff format .                 # format
 - `bushdump/camera.py` — HTTP client for `/Storage` + `/SetMode`; `httpx` imported lazily so pure helpers stay testable without it
 - `bushdump/sync.py` — pure logic: `files_to_download`/`next_watermark` (watermark) and `cameras_present` (match scanned addresses to config)
 - `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state
-- `bushdump/cli.py` — subcommands (`init`, `list`, `discover`, `add`, `sync`); orchestrates the flows
+- `bushdump/cli.py` — subcommands (`init`, `list`, `discover`, `wifi`, `add`, `sync`); orchestrates the flows
 - `tests/` — pytest; pure logic only, no real camera/BLE/WiFi needed
 - `docs/camera-api.md` — the reverse-engineered camera API reference
 
@@ -68,11 +70,13 @@ saved watermark → save watermark → power off camera WiFi. Your normal WiFi i
 restored once at the end. Races are handled by polling, not fixed sleeps.
 `--manual-wifi` swaps BLE+auto-join for a "join the AP, press Enter" prompt.
 
-## add / discover flow
+## discover / wifi / add flow
 
-`discover` is read-only: live-watch BLE then WiFi and list everything. `add` is
-the guided setup: live-watch BLE → pick → BLE-wake → live-watch WiFi (re-scan
-for the AP-boot delay) → pick SSID → password → join + confirm camera (shows
+`discover` (read-only) live-lists BLE devices only. `wifi` (read-only)
+live-lists WiFi networks; pass a BLE address and it wakes that camera first so
+its AP shows up (otherwise the camera AP is off and won't appear). `add` is the
+guided setup: live-watch BLE → pick → BLE-wake → live-watch WiFi (re-scan for
+the AP-boot delay) → pick SSID → password → join + confirm camera (shows
 `describe()`) → name it to save, or bail. Discovery lists *all* nearby
 devices/networks to pick from (no fragile filtering); `rank_ssids` only surfaces
 likely cameras first. WiFi listing needs Location permission; falls back to
