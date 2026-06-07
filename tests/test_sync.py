@@ -18,12 +18,17 @@ def test_first_run_downloads_everything_oldest_first():
 def test_only_files_newer_than_watermark():
     files = [_file(1), _file(2), _file(3)]
     result = files_to_download(files, watermark=_file(2).date)
-    assert [f.id for f in result] == [3]
+    assert [f.id for f in result] == [2, 3]
 
 
-def test_watermark_is_exclusive():
-    files = [_file(2)]
-    assert files_to_download(files, watermark=_file(2).date) == []
+def test_watermark_second_is_rechecked_for_interrupted_runs():
+    files = [
+        CameraFile(id=1, type=1, date="2026-05-10 13:00:02", size=100),
+        CameraFile(id=2, type=1, date="2026-05-10 13:00:02", size=100),
+        CameraFile(id=3, type=1, date="2026-05-10 13:00:03", size=100),
+    ]
+    result = files_to_download(files, watermark="2026-05-10 13:00:02")
+    assert [f.id for f in result] == [1, 2, 3]
 
 
 def test_legacy_int_watermark_treated_as_first_run():

@@ -1,8 +1,9 @@
 """Incremental, date-based sync logic.
 
 We persist the date string of the newest downloaded file and, on the next run,
-only pull files with a strictly later date. Pure functions here so they're easy
-to test without a camera.
+re-check files from that same second plus anything later so interrupted runs
+don't skip same-timestamp siblings. Pure functions here so they're easy to test
+without a camera.
 """
 
 from __future__ import annotations
@@ -26,15 +27,19 @@ def files_to_download(
     available: Iterable[CameraFile],
     watermark: str | None,
 ) -> list[CameraFile]:
-    """Return files strictly newer than `watermark`, oldest first.
+    """Return files at or after `watermark`, oldest first.
 
     `watermark` is the `date` of the newest file downloaded on a prior run
-    ("YYYY-MM-DD HH:MM:SS"), or None for a first run (download everything).
+    ("YYYY-MM-DD HH:MM:SS"), or None for a first run (download everything). We
+    include the watermark second again so an interrupted run cannot permanently
+    skip same-timestamp siblings; already-on-disk files are skipped by size
+    during download.
+
     Legacy int watermarks from the old id-based scheme are treated as None so
-    they trigger a full re-scan (already-on-disk files are skipped by size).
+    they trigger a full re-scan.
     """
     if watermark is None or isinstance(watermark, int):
         newer = list(available)
     else:
-        newer = [f for f in available if f.date > watermark]
+        newer = [f for f in available if f.date >= watermark]
     return sorted(newer, key=lambda f: (f.date, f.id))
