@@ -53,6 +53,8 @@ uv run ruff format .                 # format
 - `bushdump/cli.py` — subcommands (`init`, `list`, `discover`, `wifi`, `add`, `sync`); orchestrates the flows
 - `tests/` — pytest; pure logic only, no real camera/BLE/WiFi needed
 - `docs/camera-api.md` — the reverse-engineered camera API reference
+- `docs/camera-models.md` — registry of which models have been confirmed against `camera-api.md`
+- `tools/` — standalone diagnostic scripts (`inspect-ble`, `wake`, `probe-http`) for adding a new model or stepping through the BLE/WiFi/HTTP flow manually; see `tools/README.md`
 
 ## Multi-camera model
 
