@@ -144,6 +144,30 @@ def cmd_ls(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_keepalive(args: argparse.Namespace) -> int:
+    from bushdump.camera import CameraClient
+
+    cam = _resolve_camera(args.name)
+    if cam is None:
+        return 1
+    _wake_join(cam)
+    with CameraClient(cam.camera_host) as client:
+        print("Waiting for camera to respond...")
+        if not client.wait_until_ready():
+            print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
+            return 1
+        print(f"Keeping camera alive every {args.interval:.0f}s. Ctrl+C to stop.")
+        try:
+            while True:
+                time.sleep(args.interval)
+                ok = client.keep_alive()
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                print(f"  {ts}  {'ok' if ok else 'FAILED'}")
+        except KeyboardInterrupt:
+            print("\nStopped.")
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     global _log_file, _verbose
     from bushdump import ble
@@ -479,6 +503,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_ls = sub.add_parser("ls", help="list files on the camera (* = would be downloaded)")
     p_ls.add_argument("name", help="camera name (from `bd cameras`)")
     p_ls.set_defaults(func=cmd_ls)
+
+    p_keepalive = sub.add_parser("keepalive", help="keep the camera's WiFi alive (Ctrl+C to stop)")
+    p_keepalive.add_argument("name", help="camera name (from `bd cameras`)")
+    p_keepalive.add_argument(
+        "--interval",
+        type=float,
+        default=10.0,
+        help="seconds between pings (default: 10)",
+    )
+    p_keepalive.set_defaults(func=cmd_keepalive)
 
     p_register = sub.add_parser(
         "register",
