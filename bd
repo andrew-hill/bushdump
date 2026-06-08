@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Convenience wrapper so you can run `./bd sync` instead of `uv run bushdump sync`.
+# Uses --project so it works from any directory and keeps your current working dir.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec uv run --project "$SCRIPT_DIR" bushdump "$@"
