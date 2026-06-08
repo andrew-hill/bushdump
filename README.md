@@ -25,7 +25,8 @@ fundamentally a file copy.
   brew install uv
   ```
   (uv fetches the right Python version automatically — no separate Python install needed.)
-- A Bluetooth + WiFi capable machine (developed on macOS)
+- macOS with Bluetooth + WiFi hardware. BushDump uses macOS's built-in
+  CoreWLAN/`networksetup` tooling for WiFi scanning and joining.
 
 ## Install
 
@@ -44,15 +45,23 @@ Register each camera once (guided — pick from live lists, no typing long codes
 ./bd cameras         # show configured cameras
 ```
 
-Then sync whenever you like:
+Then preview or sync whenever you like:
 
 ```bash
 ./bd sync             # scan and sync every nearby configured camera
 ./bd sync frontgate   # sync just one
 ./bd ls frontgate     # preview which files would be downloaded
+```
+
+If hardware or WiFi is being awkward, the inspection commands are useful on
+their own:
+
+```bash
 ./bd stats frontgate  # battery, SD usage, file counts
 ./bd ble              # read-only: live-list nearby BLE devices
-./bd wifi [ble-addr]  # live-list WiFi networks (wake a camera first if given)
+./bd wifi             # read-only: live-list WiFi networks
+./bd wake frontgate   # wake the camera's WiFi without syncing
+./bd keepalive frontgate  # keep the camera's WiFi awake until Ctrl+C
 ./bd --help           # all commands and flags
 ```
 
