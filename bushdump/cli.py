@@ -335,7 +335,7 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                 else:
                     _vout(f"  = {f.name}  [{done_count}/{len(todo)}]  (already on disk)")
                 cam_state[media] = f.date
-                config.save_state(state)
+            config.save_state(state)
 
         if not args.keep_awake:
             client.power_off()
@@ -377,11 +377,18 @@ def cmd_wifi(args: argparse.Namespace) -> int:
             cfg = config.load_config()
             address, label = _resolve_ble_target(args.target, cfg.cameras)
             if address is None:
-                configured = ", ".join(cfg.cameras) or "(none)"
-                print(
-                    f"Unknown camera {args.target!r}. Configured: {configured}",
-                    file=sys.stderr,
-                )
+                cam = cfg.cameras.get(args.target)
+                if cam is not None:
+                    print(
+                        f"Camera {args.target!r} has no BLE address configured.",
+                        file=sys.stderr,
+                    )
+                else:
+                    configured = ", ".join(cfg.cameras) or "(none)"
+                    print(
+                        f"Unknown camera {args.target!r}. Configured: {configured}",
+                        file=sys.stderr,
+                    )
                 return 1
         _wake_and_report(address, label)
 

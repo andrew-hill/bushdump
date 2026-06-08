@@ -262,9 +262,7 @@ class CameraClient:
             pass
         counts = ["? photos", "? videos"]
         try:
-            counts_data = self._client.get("/cmd/info/3").json()
-            photo_count = counts_data.get("data", {}).get("photo", "?")
-            video_count = counts_data.get("data", {}).get("video", "?")
+            _, _, photo_count, video_count = parse_info3(self._client.get("/cmd/info/3").json())
             counts = [f"{photo_count} photos", f"{video_count} videos"]
         except Exception:
             pass

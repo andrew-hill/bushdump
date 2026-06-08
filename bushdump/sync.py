@@ -35,11 +35,6 @@ def files_to_download(
     skip same-timestamp siblings; already-on-disk files are skipped by size
     during download.
 
-    Legacy int watermarks from the old id-based scheme are treated as None so
-    they trigger a full re-scan.
     """
-    if watermark is None or isinstance(watermark, int):
-        newer = list(available)
-    else:
-        newer = [f for f in available if f.date >= watermark]
+    newer = list(available) if watermark is None else [f for f in available if f.date >= watermark]
     return sorted(newer, key=lambda f: (f.date, f.id))

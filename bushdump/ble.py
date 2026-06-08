@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient, BleakError, BleakScanner
 
 WAKE_CHARACTERISTIC_UUID = "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
 WIFI_ON_PAYLOAD = b"AT+WAKEPULSE=10\r\n"
@@ -75,7 +75,7 @@ async def wake_wifi(address: str, timeout: float = 20.0) -> bytes | None:
         reply_event.set()
 
     async with BleakClient(device, timeout=timeout) as client:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(BleakError):
             await client.start_notify(WAKE_CHARACTERISTIC_UUID, on_notify)
         await client.write_gatt_char(WAKE_CHARACTERISTIC_UUID, WIFI_ON_PAYLOAD, response=True)
         with contextlib.suppress(TimeoutError):

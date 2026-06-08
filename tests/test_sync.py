@@ -31,12 +31,6 @@ def test_watermark_second_is_rechecked_for_interrupted_runs():
     assert [f.id for f in result] == [1, 2, 3]
 
 
-def test_legacy_int_watermark_treated_as_first_run():
-    files = [_file(1), _file(2), _file(3)]
-    result = files_to_download(files, watermark=2)  # type: ignore[arg-type]
-    assert [f.id for f in result] == [1, 2, 3]
-
-
 def _cam(name, ble):
     return SimpleNamespace(name=name, ble_address=ble)
 
