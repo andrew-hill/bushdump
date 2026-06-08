@@ -1,5 +1,9 @@
 # TODO
 
+- [ ] Add time check + sync (check method in github.com/fede2cr/camtrap-control/)
+- [ ] Add command to read + display camera settings/configuration - any/all available (check method in github.com/fede2cr/camtrap-control/)
+- [ ] Review how camtrap-control implements SHA-256 validation to see if it would be useful to include in our sync for verification
+
 ## Next-visit camera smoke tests
 
 Things to confirm on hardware next time each camera is in range.
