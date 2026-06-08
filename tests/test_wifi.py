@@ -1,4 +1,4 @@
-from bushdump.cli import _is_camera_ble
+from bushdump.cli import _format_candidate_row, _is_camera_ble, _mark
 from bushdump.wifi import is_likely_camera_ssid, parse_wifi_interface, rank_ssids
 
 SAMPLE = """\
@@ -73,3 +73,19 @@ def test_is_camera_ble_negative():
 
 def test_is_camera_ble_none():
     assert not _is_camera_ble(None)
+
+
+def test_mark_is_plain_symbol():
+    assert _mark(True) == "◆"
+    assert _mark(False) == "◇"
+
+
+def test_candidate_row_highlights_full_row_on_tty():
+    row = "  ◆  CAM8Z8_backyard   abc"
+    assert _format_candidate_row(row, True, tty=True) == f"\033[1;33m{row}\033[0m"
+
+
+def test_candidate_row_stays_plain_when_not_tty_or_not_candidate():
+    row = "  ◆  CAM8Z8_backyard   abc"
+    assert _format_candidate_row(row, True, tty=False) == row
+    assert _format_candidate_row(row, False, tty=True) == row

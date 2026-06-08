@@ -363,20 +363,32 @@ def _is_camera_ble(name: str | None) -> bool:
 
 
 def _mark(is_cam: bool) -> str:
-    """Filled diamond (yellow on TTY) for camera candidates; outline diamond otherwise."""
-    if is_cam:
-        return "\033[33m◆\033[0m" if sys.stdout.isatty() else "◆"
-    return "◇"
+    """Filled diamond for camera candidates; outline diamond otherwise."""
+    return "◆" if is_cam else "◇"
+
+
+def _format_candidate_row(row: str, is_cam: bool, *, tty: bool | None = None) -> str:
+    if not is_cam:
+        return row
+    if tty is None:
+        tty = sys.stdout.isatty()
+    if not tty:
+        return row
+    return f"\033[1;33m{row}\033[0m"
 
 
 def _print_ble_found(address: str, name: str | None) -> None:
-    print(f"  {_mark(_is_camera_ble(name))}  {name or '(unnamed)'}   {address}")
+    is_cam = _is_camera_ble(name)
+    row = f"  {_mark(is_cam)}  {name or '(unnamed)'}   {address}"
+    print(_format_candidate_row(row, is_cam))
 
 
 def _print_wifi_found(ssid: str) -> None:
     from bushdump import wifi
 
-    print(f"  {_mark(wifi.is_likely_camera_ssid(ssid))}  {ssid}")
+    is_cam = wifi.is_likely_camera_ssid(ssid)
+    row = f"  {_mark(is_cam)}  {ssid}"
+    print(_format_candidate_row(row, is_cam))
 
 
 def _sorted_devices(devices: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
@@ -465,7 +477,8 @@ def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
             for i, (addr, name) in enumerate(devices):
                 is_cam = _is_camera_ble(name)
                 sym = (_mark(True) + "  ") if is_cam else "   "
-                print(f"  {f'[{i}]':<4}  {sym}{name or '(unnamed)'}   {addr}")
+                row = f"  {f'[{i}]':<4}  {sym}{name or '(unnamed)'}   {addr}"
+                print(_format_candidate_row(row, is_cam))
         prefix = "Pick a number, " if devices else ""
         choice = input(f"{prefix}[r] to watch again, blank to cancel: ").strip().lower()
         if choice == "":
@@ -492,7 +505,8 @@ def _pick_ssid(timeout: float) -> str | None:
             for i, ssid in enumerate(ssids):
                 is_cam = wifi.is_likely_camera_ssid(ssid)
                 sym = (_mark(True) + "  ") if is_cam else "   "
-                print(f"  {f'[{i}]':<4}  {sym}{ssid}")
+                row = f"  {f'[{i}]':<4}  {sym}{ssid}"
+                print(_format_candidate_row(row, is_cam))
         prefix = "Pick a number, " if ssids else ""
         raw = input(f"{prefix}[r] watch again, [m] enter manually, blank to cancel: ")
         choice = raw.strip().lower()
