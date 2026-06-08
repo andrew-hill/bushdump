@@ -345,17 +345,45 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
     return downloaded_count, conflicts
 
 
+_CAMERA_BLE_HINTS = ("cam8z8", "trail cam", "gardepro", "dsoon", "campark")
+
+
+def _is_camera_ble(name: str | None) -> bool:
+    if not name:
+        return False
+    low = name.lower()
+    return any(h in low for h in _CAMERA_BLE_HINTS)
+
+
+def _mark(is_cam: bool) -> str:
+    """Filled diamond (yellow on TTY) for camera candidates; outline diamond otherwise."""
+    if is_cam:
+        return "\033[33m◆\033[0m" if sys.stdout.isatty() else "◆"
+    return "◇"
+
+
 def _print_ble_found(address: str, name: str | None) -> None:
-    print(f"  • {name or '(unnamed)'}   {address}")
+    print(f"  {_mark(_is_camera_ble(name))}  {name or '(unnamed)'}   {address}")
 
 
 def _print_wifi_found(ssid: str) -> None:
-    print(f"  • {ssid}")
+    from bushdump import wifi
+
+    print(f"  {_mark(wifi.is_likely_camera_ssid(ssid))}  {ssid}")
 
 
 def _sorted_devices(devices: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
-    """Named devices first, then alphabetical — easier to spot the camera."""
-    return sorted(devices, key=lambda d: (d[1] is None, (d[1] or "").lower()))
+    """Camera candidates first, then other named devices, then unnamed."""
+
+    def key(d: tuple[str, str | None]) -> tuple[int, str]:
+        addr, name = d
+        if _is_camera_ble(name):
+            return (0, (name or "").lower())
+        if name is not None:
+            return (1, name.lower())
+        return (2, addr.lower())
+
+    return sorted(devices, key=key)
 
 
 def cmd_ble(args: argparse.Namespace) -> int:
@@ -428,7 +456,9 @@ def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
         if devices:
             print("\nDevices found:")
             for i, (addr, name) in enumerate(devices):
-                print(f"  [{i}] {name or '(unnamed)'}   {addr}")
+                is_cam = _is_camera_ble(name)
+                sym = (_mark(True) + "  ") if is_cam else "   "
+                print(f"  {f'[{i}]':<4}  {sym}{name or '(unnamed)'}   {addr}")
         prefix = "Pick a number, " if devices else ""
         choice = input(f"{prefix}[r] to watch again, blank to cancel: ").strip().lower()
         if choice == "":
@@ -453,7 +483,9 @@ def _pick_ssid(timeout: float) -> str | None:
         if ssids:
             print("\nNetworks found:")
             for i, ssid in enumerate(ssids):
-                print(f"  [{i}] {ssid}")
+                is_cam = wifi.is_likely_camera_ssid(ssid)
+                sym = (_mark(True) + "  ") if is_cam else "   "
+                print(f"  {f'[{i}]':<4}  {sym}{ssid}")
         prefix = "Pick a number, " if ssids else ""
         raw = input(f"{prefix}[r] watch again, [m] enter manually, blank to cancel: ")
         choice = raw.strip().lower()

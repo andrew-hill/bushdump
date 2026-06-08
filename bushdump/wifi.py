@@ -51,22 +51,28 @@ def _scan_once() -> list[str]:
         return []
 
 
-def rank_ssids(ssids: list[str], name_hint: str = "Trail Cam") -> list[str]:
-    """Dedupe and sort SSIDs, surfacing likely trail cameras (name_hint) first."""
-    hint = name_hint.lower()
+_CAMERA_SSID_HINTS = ("cam8z8", "trail cam")
+
+
+def is_likely_camera_ssid(ssid: str) -> bool:
+    low = ssid.lower()
+    return any(h in low for h in _CAMERA_SSID_HINTS)
+
+
+def rank_ssids(ssids: list[str]) -> list[str]:
+    """Dedupe and sort SSIDs, surfacing likely trail cameras first."""
     unique = sorted(set(ssids))
-    return sorted(unique, key=lambda s: (hint not in s.lower(), s.lower()))
+    return sorted(unique, key=lambda s: (not is_likely_camera_ssid(s), s.lower()))
 
 
-def scan_ssids(name_hint: str = "Trail Cam") -> list[str]:
+def scan_ssids() -> list[str]:
     """One CoreWLAN scan, ranked. Empty if scanning is unavailable."""
-    return rank_ssids(_scan_once(), name_hint)
+    return rank_ssids(_scan_once())
 
 
 def watch_ssids(
     seconds: float = 8.0,
     on_found: Callable[[str], None] | None = None,
-    name_hint: str = "Trail Cam",
 ) -> list[str]:
     """Repeatedly scan for `seconds`, calling `on_found(ssid)` as each new network
     appears (the camera AP can take a few seconds to come up). Returns ranked SSIDs.
@@ -82,7 +88,7 @@ def watch_ssids(
                 if on_found is not None:
                     on_found(ssid)
         time.sleep(0.5)
-    return rank_ssids(list(seen), name_hint)
+    return rank_ssids(list(seen))
 
 
 def wait_for_ssid(ssid: str, timeout: float = 20.0) -> bool:
