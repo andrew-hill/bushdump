@@ -554,9 +554,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bushdump",
         description="Dump photos/videos off trail cameras over their WiFi APs.",
+        usage="%(prog)s [--version] <command> ...",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(
+        dest="command", title="commands", metavar="  ./bd <command> -h for per-command options"
+    )
 
     p_cameras = sub.add_parser("cameras", help="list configured cameras")
     p_cameras.set_defaults(func=cmd_cameras)
