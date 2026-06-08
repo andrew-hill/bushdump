@@ -334,6 +334,8 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                     _out(f"  ↓ {saved_name}  [{', '.join(parts)}]")
                 else:
                     _vout(f"  = {f.name}  [{done_count}/{len(todo)}]  (already on disk)")
+                # Advance even for already-on-disk files — clean re-runs
+                # shouldn't re-check this window.
                 cam_state[media] = f.date
             config.save_state(state)
 
@@ -375,21 +377,21 @@ def cmd_wifi(args: argparse.Namespace) -> int:
         else:
             # Camera name — requires config.
             cfg = config.load_config()
-            address, label = _resolve_ble_target(args.target, cfg.cameras)
-            if address is None:
-                cam = cfg.cameras.get(args.target)
-                if cam is not None:
-                    print(
-                        f"Camera {args.target!r} has no BLE address configured.",
-                        file=sys.stderr,
-                    )
-                else:
-                    configured = ", ".join(cfg.cameras) or "(none)"
-                    print(
-                        f"Unknown camera {args.target!r}. Configured: {configured}",
-                        file=sys.stderr,
-                    )
+            cam = cfg.cameras.get(args.target)
+            if cam is None:
+                configured = ", ".join(cfg.cameras) or "(none)"
+                print(
+                    f"Unknown camera {args.target!r}. Configured: {configured}",
+                    file=sys.stderr,
+                )
                 return 1
+            if not cam.ble_address:
+                print(
+                    f"Camera {args.target!r} has no BLE address configured.",
+                    file=sys.stderr,
+                )
+                return 1
+            address, label = cam.ble_address, f"{args.target} ({cam.ble_address})"
         _wake_and_report(address, label)
 
     if not wifi.corewlan_available():
@@ -403,24 +405,6 @@ def cmd_wifi(args: argparse.Namespace) -> int:
     if not wifi.watch_ssids(timeout, _print_wifi_found):
         print("  (none found)")
     return 0
-
-
-def _resolve_ble_target(token: str, cameras: dict[str, config.Camera]) -> tuple[str | None, str]:
-    """Resolve a CLI token to a BLE address + display label.
-
-    If `token` matches a configured camera name, returns its BLE address and a
-    label like `"east (5919...)"`. Otherwise treats the token as a literal
-    BLE address. Returns `(None, token)` if the token looks like a name (no
-    dashes/colons) but doesn't match any configured camera.
-    """
-    cam = cameras.get(token)
-    if cam:
-        if not cam.ble_address:
-            return None, token
-        return cam.ble_address, f"{token} ({cam.ble_address})"
-    if "-" in token or ":" in token:
-        return token, token
-    return None, token
 
 
 def _wake_and_report(address: str, label: str) -> None:

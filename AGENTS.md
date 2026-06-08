@@ -117,6 +117,10 @@ Location permission; falls back to manual SSID entry otherwise.
   expected; don't add TLS/auth theatre. But never expose it beyond the AP.
 - **Never commit captured media, the WiFi password, or sync-state files.**
   See `.gitignore`.
+- **The WiFi password is a factory default** (`1234567890`), not a user secret —
+  it's a shared, well-known default for this camera platform. Logging or printing
+  it in diagnostic output is acceptable; it has no higher sensitivity than the
+  SSID itself.
 
 ## Camera API
 
