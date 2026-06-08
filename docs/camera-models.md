@@ -37,7 +37,7 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 
 - BLE peripheral name: `CAM8Z8_<location>_G_E8 2`
 - WiFi SSID: `CAM8Z8_<wifi-mac-hex>` (e.g. `CAM8Z8_A4C13896B3B0`)
-- WPA2 join: ✅ confirmed with `1234567890`
+- WPA2: `1234567890` ✅
 - Hardware: `LK8625_V1.6`, firmware `v1.0.5`, manufacturer Shenzhen Linkiing
   Technology Co.,Ltd.
 - BLE wake char: `6e400004-b5a3-f393-e0a9-e50e24dcca9e`, same as E6PMB.
@@ -45,10 +45,21 @@ shape described in `camera-api.md`. Per-model deviations called out below.
   normal; the AP still comes up.
 - ⚠️ **Wake reliability unclear**: required multiple `bd wake` attempts before
   the AP appeared in practice. Unclear if this is a timing issue (the AT
-  command needs repeating), a BLE connection race, or something else. HTTP
-  sync after manual WiFi join worked fine once up. Worth investigating whether
-  retrying the write or adding a delay helps.
-- HTTP API: not yet probed; assumed identical to E6PMB pending verification.
+  command needs repeating), a BLE connection race, or something else. Worth
+  investigating whether retrying the write or adding a delay helps.
+- HTTP file listing (`/list/detail/forward/`): ✅ confirmed — 2152 photos
+  listed correctly
+- HTTP photo download (`/file/<id>/JPG`): ✅ confirmed — 1–3 MB JPGs,
+  0.7–2.8 MB/s (avg ~1.1 MB/s)
+- Keep-alive (`/cmd/standby/reset`): ✅ confirmed — held connection across
+  hundreds of files over multiple hours
+- Resume/watermark: ✅ confirmed — sync interrupted by `httpx.ReadTimeout`
+  (laptop sleep) and resumed correctly from the last completed file
+- Videos: ❓ not confirmed — no videos on SD card during test
+- Power-off (`/cmd/standby/now`): ❓ not confirmed — sync crashed before
+  clean exit
+- HTTP info endpoints (`/cmd/info/1..5`, `/cmd/getSetting` etc.): ❓ not
+  probed; assumed identical to E6PMB
 
 ### GardePro E9P — 📚 Reported
 

@@ -245,7 +245,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 total += n
                 all_conflicts.extend(conflicts)
             except KeyboardInterrupt:
-                _out("\nInterrupted — progress saved.", err=True)
+                _out("\nInterrupted — progress saved up to last completed file.", err=True)
                 if all_conflicts:
                     _out_conflicts(all_conflicts)
                 return 1
@@ -337,7 +337,7 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                 # Advance even for already-on-disk files — clean re-runs
                 # shouldn't re-check this window.
                 cam_state[media] = f.date
-            config.save_state(state)
+                config.save_state(state)
 
         if not args.keep_awake:
             client.power_off()
