@@ -232,8 +232,17 @@ def cmd_sync(args: argparse.Namespace) -> int:
             cameras = list(cfg.cameras.values())
             _out(f"Manual WiFi mode — will prompt for: {', '.join(c.name for c in cameras)}")
         else:
+            from bleak.exc import BleakBluetoothNotAvailableError
+
             _out("Scanning for nearby cameras...")
-            present = {addr for addr, _ in asyncio.run(ble.discover(timeout=args.scan_timeout))}
+            try:
+                present = {addr for addr, _ in asyncio.run(ble.discover(timeout=args.scan_timeout))}
+            except BleakBluetoothNotAvailableError:
+                _out(
+                    "Bluetooth unavailable — use --manual-wifi to sync without BLE.",
+                    err=True,
+                )
+                return 1
             cameras = sync.cameras_present(cfg.cameras.values(), present)
             if not cameras:
                 _out(f"None of your cameras are nearby. Configured: {', '.join(cfg.cameras)}")
@@ -406,11 +415,21 @@ def _sorted_devices(devices: list[tuple[str, str | None]]) -> list[tuple[str, st
 
 
 def cmd_ble(args: argparse.Namespace) -> int:
+    from bleak.exc import BleakBluetoothNotAvailableError
+
     from bushdump import ble
 
     print(f"Watching for BLE devices for {args.timeout:.0f}s...")
-    if not asyncio.run(ble.watch(args.timeout, _print_ble_found)):
-        print("  (none found)")
+    try:
+        if not asyncio.run(ble.watch(args.timeout, _print_ble_found)):
+            print("  (none found)")
+    except BleakBluetoothNotAvailableError:
+        print(
+            "Bluetooth unavailable — check macOS Privacy & Security settings.\n"
+            "To sync without BLE: manually join the camera's WiFi AP, then run `bushdump sync --manual-wifi`.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -450,9 +469,14 @@ def _wake_and_report(address: str, label: str) -> None:
     """Wake the camera by address, printing the camera's ack on success."""
     from bushdump import ble
 
+    from bleak.exc import BleakBluetoothNotAvailableError
+
     _out(f"Waking {label} over BLE to bring its WiFi up...")
     try:
         reply = asyncio.run(ble.wake_wifi(address))
+    except BleakBluetoothNotAvailableError:
+        _out("  (Bluetooth unavailable — check macOS Privacy & Security settings.)")
+        return
     except Exception as e:
         _out(f"  (BLE wake failed: {e})")
         return
@@ -467,11 +491,20 @@ def _wake_and_report(address: str, label: str) -> None:
 
 
 def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
+    from bleak.exc import BleakBluetoothNotAvailableError
+
     from bushdump import ble
 
     while True:
         print(f"\nWatching for BLE devices for {timeout:.0f}s...")
-        devices = _sorted_devices(asyncio.run(ble.watch(timeout, _print_ble_found)))
+        try:
+            devices = _sorted_devices(asyncio.run(ble.watch(timeout, _print_ble_found)))
+        except BleakBluetoothNotAvailableError:
+            print(
+                "Bluetooth unavailable — check macOS Privacy & Security settings.",
+                file=sys.stderr,
+            )
+            return None
         if devices:
             print("\nDevices found:")
             for i, (addr, name) in enumerate(devices):
