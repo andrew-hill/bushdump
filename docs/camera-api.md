@@ -33,17 +33,29 @@ the HTTP server is up as soon as the AP is.
 GET /cmd/info/1                          # brand/product/version
 GET /cmd/info/2                          # battery, temperature, ext power
 GET /cmd/info/3                          # SD: total/used, photo/video count
-GET /cmd/info/4                          # clock + timezone
+GET /cmd/info/4                          # clock + timezone (response shape TBC from hardware)
+POST /cmd/setGmtClock {"data":"YYYY-MM-DD HH:MM:SS"}   # set clock (firmware variant A)
+POST /cmd/setGmtClock2 {"data":"YYYY-MM-DD HH:MM:SS"}  # set clock (firmware variant B)
 GET /cmd/info/5                          # extended HW/FW/BLE/battery info
 GET /cmd/getSetting                      # all user-facing settings
 GET /cmd/getParaSetting                  # enum/lookup tables for settings
 POST /cmd/setSetting {"data":{"k":v}}    # mutate a setting
 GET /cmd/standby/reset                   # keep-alive (call every ~20s)
 GET /cmd/standby/now                     # turn WiFi off
-GET /list/detail/forward/<from_id>/<n>   # file listing, paginated
+GET /cmd/reboot                          # reboot camera (WiFi drops; no reliable response)
+GET /cmd/resetFact                       # factory reset (destructive; WiFi drops)
+GET /cmd/format/start                    # format SD card (destructive — wipes all media)
+GET /cmd/format/result                   # poll SD format status (see response note below)
+GET /list/detail/forward/<from_id>/<n>   # file listing, paginated (forward = direction; backward may exist)
 GET /file/<id>/<JPG|MP4>                 # full file download
-GET /thumb/<id>/JPG                      # thumbnail
+GET /thumb/<id>/<JPG|MP4>               # thumbnail (MP4 variant unverified)
 GET /cmd/delete/<id>/<JPG|MP4>           # delete (see safety note)
+POST /media/pic/take                     # trigger a remote photo capture
+POST /media/pic/result                   # poll result of last photo capture
+POST /media/video/start                  # start remote video recording
+POST /media/video/stop                   # stop remote video recording
+GET /media/getIrStatus                   # get IR / night-vision status
+POST /media/setDayNightMode {"data":{"DayNightMode":<mode>}}  # set day/night mode (values from /cmd/getParaSetting)
 ```
 
 ### File listing JSON fields
@@ -73,11 +85,20 @@ Pagination: `/list/detail/forward/<from_id>/<page_size>` returns files with
 Keep-alive: hit `/cmd/standby/reset` every ~20s during a sync, otherwise the
 camera will idle out and drop the AP mid-download.
 
+### `/cmd/format/result` response
+
+Poll until `data.status` (or `data.result`) is one of `"done"`, `"finish"`,
+`"finished"`, `1`, or `True`. The field name and value vary by firmware.
+
 ## ⚠️ Safety
 
 - `/cmd/delete/<id>/<JPG|MP4>` permanently removes files from the SD card.
   BushDump does not call it by default — downloads are copies, the SD card
   keeps the originals. Only wire up delete if explicitly asked.
+- `/cmd/format/start` wipes the entire SD card. Do not call without explicit
+  user confirmation.
+- `/cmd/resetFact` and `/cmd/reboot` drop the WiFi AP before sending a
+  response — wrap in try/except; a connection error is expected and normal.
 - Skip `/cmd/standby/now` if the user might want to keep using the AP after
   the sync.
 
@@ -106,6 +127,16 @@ firmware revisions:
   may add more types (timelapse, audio) with higher values.
 - **`/cmd/info/N`** — the N=1..5 split here matches our E6PMB; other models
   may have a different N range or different fields per N.
+- **File listing response envelope** — `/list/detail/forward/` wraps the file
+  array under `data.list` on some firmware, `data.files` on others, or bare
+  `data` (array directly) on others. Check all three before erroring.
+- **File timestamp field name** — most firmware uses `date`; some use `time`.
+  Both are `YYYY-MM-DD HH:MM:SS` strings.
+- **`/cmd/setGmtClock` vs `/cmd/setGmtClock2`** — both set the camera clock
+  with the same payload; they exist as separate endpoints for different firmware
+  builds of the same camera line (not different models). Try `setGmtClock` first;
+  if the clock doesn't change after the call (verify by re-reading `/cmd/info/4`),
+  try `setGmtClock2`. Source: camtrap-control docstrings + CLI `--variant` flag.
 
 ## Re-adding legacy OEM (`0xFF00` BLE / `192.168.1.8`) support
 
