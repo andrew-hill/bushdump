@@ -7,8 +7,6 @@
 - [ ] Add command to read + display camera settings/configuration.
       Consider any/all available settings (check method in github.com/fede2cr/camtrap-control/
       and probe each camera for variations by model/firmware)
-- [ ] Review how camtrap-control implements SHA-256 validation to see if it would
-      be useful to include in our sync for verification
 - [ ] Add appropriate credits to README.md for info + code sourced from other users
       (license-appropriate, or in the spirit of BSD/MIT-style license or academic
       reference where repos lack a license)

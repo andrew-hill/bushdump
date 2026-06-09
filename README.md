@@ -81,6 +81,30 @@ See [AGENTS.md](AGENTS.md) for contributor/agent guidance (`CLAUDE.md` is a
 symlink to it) and [docs/camera-api.md](docs/camera-api.md) for the
 reverse-engineered camera API.
 
+## Credits
+
+BushDump's implementation is original, but the camera protocol work builds on
+community reverse-engineering notes from:
+
+- [vondruska/gardepro-fetcher](https://github.com/vondruska/gardepro-fetcher)
+  for GardePro E9P Linkiing protocol details, including the BLE WiFi wake
+  command, default WiFi behavior, keepalive endpoint, and `/cmd` + `/list` +
+  `/file` HTTP shape.
+- [fede2cr/camtrap-control](https://github.com/fede2cr/camtrap-control) for an
+  independent Python implementation of the Linkiing camera API, useful for
+  cross-checking endpoint names, settings, clock, and JSON conventions.
+- [Geek IT Guide's Dsoon trailcam investigation](https://geekitguide.com/wifi-ble-trailcam-investigation-part-2/)
+  and [fearthis4/wifi-ble-trailcam-investigations](https://github.com/fearthis4/wifi-ble-trailcam-investigations)
+  for the older Dsoon/GardePro OEM BLE and `/Storage` API notes documented in
+  [docs/camera-api.md](docs/camera-api.md).
+
+## Disclaimer
+
+BushDump is a personal project shared so others can learn from it, adapt it, or
+debug similar cameras. Trail cameras and their wireless APIs are flaky, firmware
+varies, and this code may fail or need changes for your setup. Use it at your
+own risk, and do not rely on it as polished or guaranteed software.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
