@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -151,11 +152,13 @@ class CameraClient:
 
     # --- API calls ---------------------------------------------------------
 
-    def list_all_files(self) -> list[CameraFile]:
+    def list_all_files(self, on_page: Callable[[int], None] | None = None) -> list[CameraFile]:
         """Fetch all files on the camera in one paginated scan.
 
         Retries each page once on ReadTimeout — the camera's HTTP server
         occasionally stalls mid-listing on longer card contents.
+
+        on_page, if provided, is called with the running file count after each page.
         """
         import httpx
 
@@ -176,6 +179,8 @@ class CameraClient:
             if not page:
                 break
             files.extend(page)
+            if on_page is not None:
+                on_page(len(files))
             from_id = page[-1].id
         return files
 

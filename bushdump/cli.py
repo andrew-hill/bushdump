@@ -387,7 +387,15 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
         cam_state = state.setdefault(cam.name, {})
         conflicts: list[str] = []
         last_alive = time.monotonic()
-        all_files = client.list_all_files()
+        _out("Listing files...")
+        _listing_pages: list[int] = []
+
+        def _on_page(n: int) -> None:
+            _listing_pages.append(n)
+            if len(_listing_pages) > 1:
+                _out(f"  … {n} files")
+
+        all_files = client.list_all_files(on_page=_on_page)
         for media in MEDIA_TYPES:
             type_code = _MEDIA_TYPE_CODE[media]
             watermark = cam_state.get(media)
