@@ -59,6 +59,17 @@ def test_jpeg_timelapse_com_after_eoi(tmp_path: Path) -> None:
     assert validate_media(p, "JPG") == []
 
 
+def test_all_black_passes(tmp_path: Path) -> None:
+    from PIL import Image
+
+    img = Image.new("RGB", (16, 16), (0, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    p = tmp_path / "black.jpg"
+    p.write_bytes(buf.getvalue())
+    assert validate_media(p, "JPG") == []
+
+
 def test_jpeg_garbage_body_fails_pillow(tmp_path: Path) -> None:
     # Valid SOI + EOI wrapping junk — Pillow should reject the corrupt body
     p = tmp_path / "img.jpg"

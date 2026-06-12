@@ -317,9 +317,10 @@ class CameraClient:
         actual = tmp.stat().st_size
         tmp.replace(dest)
         tmp2.replace(alt)
+        combined = failures + [f"re-download: {r}" for r in failures2]
         _write_sidecar(
             sidecar,
-            failures,
+            combined,
             expected_size=file.size,
             actual_size=actual,
             identical=False,

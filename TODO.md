@@ -6,14 +6,13 @@
       genuinely in-sync (e.g. via NTP).
 - [ ] Add more graceful error handling to avoid large trace outputs from reasonably
       expected issues.
+- [ ] Add `bd sync --retry` to re-download files that already have a `.error.txt` sidecar.
 - [ ] Bring MP4 validation in line with JPEG validation.
 - [ ] Improve JPEG pixel-corruption detection: `corrupt-scan-zeros.jpg` and
       `corrupt-scan-flip.jpg` in `tests/fixtures/corrupt-jpegs/` currently pass
       validation because libjpeg's error concealment fills in corrupted MCUs with
       plausible-looking repeated rows. Would need to detect large runs of identical
       MCU rows or similar heuristic to catch partial-download / bit-flip corruption.
-- [ ] Add a tool to validate files in place (doesn't need to be part of main bd tool
-      so just in tools/)
 
 ## Next-visit camera smoke tests
 

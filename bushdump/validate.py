@@ -53,7 +53,9 @@ def _check_pillow(path: Path) -> list[str]:
         thumb = img.resize((64, 64), Image.BOX).convert("HSV")
         _, _, v_ch = thumb.split()
         v_lo, v_hi = v_ch.getextrema()
-        if v_lo == v_hi:
+        if v_lo == v_hi and v_hi > 10:
+            # Skip all-dark frames (V≤10) — a lens cap or pitch-dark scene is
+            # indistinguishable from an all-zero dead sensor output.
             return ["image is entirely a single brightness (possible dead sensor)"]
     except UnidentifiedImageError as e:
         return [f"Pillow could not identify image: {e}"]

@@ -465,6 +465,11 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                         _out(f"  ! {f.name} conflicts — saved as {saved_name}", err=True)
                         conflicts.append(f"{cam.name}: {f.name} saved as {saved_name}")
                     _out(f"  ↓ {saved_name}  [{', '.join(parts)}]")
+                    if saved.with_name(saved.name + ".error.txt").exists():
+                        _out(
+                            f"  ! validation failed — see {saved.name}.error.txt",
+                            err=True,
+                        )
                 else:
                     _vout(f"  = {f.name}  [{done_count}/{len(todo)}]  (already on disk)")
                 # Advance even for already-on-disk files — clean re-runs

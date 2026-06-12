@@ -166,6 +166,43 @@ def test_ls_prints_listing_progress(capsys):
     assert "1 files on camera" in out
 
 
+def test_sync_warns_on_corrupt_download(tmp_path, capsys):
+    file = CameraFile(id=1, type=1, date="2026-05-10 13:00:01", size=1024)
+    dest = tmp_path / file.name
+    sidecar = dest.with_name(dest.name + ".error.txt")
+    dest.write_bytes(b"\x00" * 100)
+    sidecar.write_text("Validation failed: invalid JPEG\n")
+
+    mock_cam = MagicMock()
+    mock_cam.name = "frontgate"
+    mock_cam.camera_host = "192.168.8.1:8080"
+    mock_cam.ssid = "TestCam_AP"
+    mock_cam.output_dir = tmp_path
+
+    client = MagicMock()
+    client.wait_until_ready.return_value = True
+    client.list_all_files.return_value = [file]
+    client.download.return_value = dest
+    client.__enter__ = lambda s: client
+    client.__exit__ = MagicMock(return_value=False)
+
+    args = MagicMock()
+    args.manual_wifi = False
+    args.keep_awake = False
+
+    with (
+        patch("bushdump.wifi.current_ssid", return_value="TestCam_AP"),
+        patch("bushdump.camera.CameraClient", return_value=client),
+        patch("bushdump.config.save_state"),
+    ):
+        n, conflicts = cli._sync_one(mock_cam, {}, args)
+
+    assert n == 1
+    err = capsys.readouterr().err
+    assert "validation failed" in err
+    assert sidecar.name in err
+
+
 def test_command_aliases_preserve_arguments():
     parser = cli.build_parser()
 
