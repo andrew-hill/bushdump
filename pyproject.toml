@@ -9,6 +9,7 @@ authors = [{ name = "Andrew Hill" }]
 dependencies = [
     "bleak>=0.22",
     "httpx>=0.27",
+    "pillow>=10",
     "pyobjc-framework-corewlan>=10 ; sys_platform == 'darwin'",
 ]
 

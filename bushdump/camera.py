@@ -7,11 +7,14 @@ HTTP on its own WiFi AP (default 192.168.8.1:8080).
 from __future__ import annotations
 
 import contextlib
+import filecmp
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+from bushdump.validate import validate_media
 
 # httpx is imported lazily inside CameraClient so the pure helpers above
 # (CameraFile, parse_file_page) and the sync logic stay importable without it.
@@ -103,6 +106,41 @@ def parse_file_page(data: object) -> list[CameraFile]:
     return out
 
 
+def _sidecar_path(dest: Path) -> Path:
+    return dest.with_name(dest.name + ".error.txt")
+
+
+def _check_size(path: Path, expected: int) -> list[str]:
+    actual = path.stat().st_size
+    if actual != expected:
+        return [f"incomplete download: expected {expected} B, got {actual} B"]
+    return []
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    return filecmp.cmp(a, b, shallow=False)
+
+
+def _write_sidecar(
+    path: Path,
+    reasons: list[str],
+    *,
+    expected_size: int,
+    actual_size: int,
+    identical: bool,
+    alt_path: Path | None,
+) -> None:
+    lines = [
+        f"Validation failed: {'; '.join(reasons)}",
+        f"Downloaded: {datetime.now(UTC).isoformat(timespec='seconds')}",
+        f"File size: {actual_size} bytes (expected {expected_size})",
+        f"Identical on re-download: {'yes' if identical else 'no'}",
+    ]
+    if alt_path is not None:
+        lines.append(f"Alt file saved: {alt_path.name}")
+    path.write_text("\n".join(lines) + "\n")
+
+
 class CameraClient:
     """Thin wrapper over the camera HTTP API."""
 
@@ -184,39 +222,10 @@ class CameraClient:
             from_id = page[-1].id
         return files
 
-    def download(self, file: CameraFile, dest_dir: Path) -> Path | None:
-        """Stream a file to dest_dir. Returns the saved path, or None if already complete.
-
-        Filenames include the camera timestamp, so collisions are extremely
-        rare. If one does occur (same timestamp+id, different content), a
-        numeric suffix (_2, _3, …) is appended until a free slot is found.
-
-        Retries once on a fresh connection if the camera dropped the persistent
-        connection after the previous response (RemoteProtocolError).
-        """
+    def _stream_to_tmp(self, file: CameraFile, tmp: Path) -> None:
+        """Stream a file from the camera to tmp. Retries once on RemoteProtocolError."""
         import httpx
 
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / file.name
-        if dest.exists() and dest.stat().st_size == file.size:
-            return None
-        if dest.exists():
-            # Collision: same timestamp+id but different size. Find a free slot.
-            stem, _, suffix = file.name.rpartition(".")
-            counter = 2
-            while True:
-                candidate = dest_dir / f"{stem}_{counter}.{suffix}"
-                if not candidate.exists():
-                    dest = candidate
-                    break
-                if candidate.stat().st_size == file.size:
-                    return None  # already downloaded under this suffix
-                counter += 1
-        # .part keeps dest absent until the write is complete, so an interrupted
-        # run leaves dest.exists() False and the next run retries cleanly.
-        # The size check before rename catches silent truncations (camera closes
-        # the stream early without raising), which .part alone cannot detect.
-        tmp = dest.with_suffix(dest.suffix + ".part")
         for attempt in range(2):
             try:
                 with self._client.stream("GET", f"/file/{file.id}/{file.kind}") as resp:
@@ -224,20 +233,98 @@ class CameraClient:
                     with tmp.open("wb") as fh:
                         for chunk in resp.iter_bytes():
                             fh.write(chunk)
-                break
+                return
             except httpx.RemoteProtocolError:
                 if attempt == 1:
                     raise
                 tmp.unlink(missing_ok=True)
                 self._client.close()
                 self._client = httpx.Client(base_url=self.base_url, timeout=self._timeout)
-        actual = tmp.stat().st_size
-        if actual != file.size:
+
+    def download(self, file: CameraFile, dest_dir: Path) -> Path | None:
+        """Stream a file to dest_dir. Returns the saved path, or None if already complete.
+
+        Filenames include the camera timestamp, so collisions are extremely
+        rare. If one does occur (same timestamp+id, different content), a
+        numeric suffix (_2, _3, …) is appended until a free slot is found.
+
+        On validation failure, re-downloads and compares the two copies:
+        - identical bytes → camera-side corruption; saves with .error.txt sidecar
+        - different bytes, second clean → transit error, silently recovered
+        - different bytes, both bad → saves both (.alt copy) with sidecar
+        """
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / file.name
+        sidecar = _sidecar_path(dest)
+
+        if dest.exists():
+            if sidecar.exists() or dest.stat().st_size == file.size:
+                return None
+            # Collision: same name, different size, no sidecar → find a free slot.
+            stem, _, suffix = file.name.rpartition(".")
+            counter = 2
+            while True:
+                candidate = dest_dir / f"{stem}_{counter}.{suffix}"
+                if not candidate.exists():
+                    dest = candidate
+                    sidecar = _sidecar_path(dest)
+                    break
+                if _sidecar_path(candidate).exists() or candidate.stat().st_size == file.size:
+                    return None
+                counter += 1
+
+        # .part keeps dest absent during the write so an interrupted run retries cleanly.
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        self._stream_to_tmp(file, tmp)
+        failures = _check_size(tmp, file.size) + validate_media(tmp, file.kind)
+        if not failures:
+            tmp.replace(dest)
+            return dest
+
+        # First download failed validation — re-download and compare.
+        tmp2 = dest.with_suffix(dest.suffix + ".part2")
+        try:
+            self._stream_to_tmp(file, tmp2)
+        except Exception:
             tmp.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"Incomplete download: {file.name} expected {file.size} B, got {actual} B"
+            tmp2.unlink(missing_ok=True)
+            raise
+
+        if _files_identical(tmp, tmp2):
+            # Same bytes both times → camera-side corruption; accept and note it.
+            actual = tmp.stat().st_size
+            tmp.replace(dest)
+            tmp2.unlink(missing_ok=True)
+            _write_sidecar(
+                sidecar,
+                failures,
+                expected_size=file.size,
+                actual_size=actual,
+                identical=True,
+                alt_path=None,
             )
+            return dest
+
+        # Different bytes → transit error; check if the second download is clean.
+        failures2 = _check_size(tmp2, file.size) + validate_media(tmp2, file.kind)
+        if not failures2:
+            tmp.unlink(missing_ok=True)
+            tmp2.replace(dest)
+            return dest
+
+        # Both downloads failed with different content — keep both for inspection.
+        alt = dest.with_suffix(".alt" + dest.suffix)
+        actual = tmp.stat().st_size
         tmp.replace(dest)
+        tmp2.replace(alt)
+        _write_sidecar(
+            sidecar,
+            failures,
+            expected_size=file.size,
+            actual_size=actual,
+            identical=False,
+            alt_path=alt,
+        )
         return dest
 
     def stats(self) -> CameraStats:
