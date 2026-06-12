@@ -432,6 +432,15 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
             watermark = cam_state.get(media)
             available = [f for f in all_files if f.type == type_code]
             todo = sync.files_to_download(available, watermark)
+            if getattr(args, "retry", False):
+                todo_ids = {f.id for f in todo}
+                extra = [
+                    f
+                    for f in available
+                    if f.id not in todo_ids
+                    and (cam.output_dir / f.name).with_name(f.name + ".error.txt").exists()
+                ]
+                todo = sorted(extra + todo, key=lambda f: f.date)
             truly_new = sum(1 for f in todo if watermark is None or f.date > watermark)
             _out(f"{media}: {truly_new} new of {len(available)}")
             todo_bytes = sum(f.size for f in todo)
@@ -445,7 +454,11 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                     last_alive = now
                     _vout(f"  [keep-alive → {'ok' if ok else 'failed'}]")
                 t0 = time.monotonic()
-                saved = client.download(f, cam.output_dir)
+                is_retry = (
+                    getattr(args, "retry", False)
+                    and (cam.output_dir / f.name).with_name(f.name + ".error.txt").exists()
+                )
+                saved = client.download(f, cam.output_dir, retry=is_retry)
                 file_elapsed = time.monotonic() - t0
                 done_bytes += f.size
                 if saved is not None:
@@ -460,6 +473,8 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                         remaining = todo_bytes - done_bytes
                         eta_str = _fmt_eta(remaining / avg_rate)
                         parts.append(f"ETA {eta_str} ({avg_rate / 1_000_000:.1f} MB/s avg)")
+                    if is_retry:
+                        parts.append("retry")
                     saved_name = saved.name
                     if saved_name != f.name:
                         _out(f"  ! {f.name} conflicts — saved as {saved_name}", err=True)
@@ -874,6 +889,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="show extra detail on stdout (keep-alive, etc.); always included in log",
+    )
+    p_sync.add_argument(
+        "--retry",
+        action="store_true",
+        help="re-download files that previously failed validation (.error.txt sidecars)",
     )
     p_sync.set_defaults(func=cmd_sync)
 

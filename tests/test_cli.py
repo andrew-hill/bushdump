@@ -203,6 +203,51 @@ def test_sync_warns_on_corrupt_download(tmp_path, capsys):
     assert sidecar.name in err
 
 
+def test_sync_retry_rerequests_sidecar_files(tmp_path, capsys):
+    file = CameraFile(id=1, type=1, date="2026-05-10 13:00:01", size=1024)
+    dest = tmp_path / file.name
+    sidecar = dest.with_name(dest.name + ".error.txt")
+    dest.write_bytes(b"\x00" * 100)
+    sidecar.write_text("Validation failed: invalid JPEG\n")
+
+    mock_cam = MagicMock()
+    mock_cam.name = "frontgate"
+    mock_cam.camera_host = "192.168.8.1:8080"
+    mock_cam.ssid = "TestCam_AP"
+    mock_cam.output_dir = tmp_path
+
+    client = MagicMock()
+    client.wait_until_ready.return_value = True
+    client.list_all_files.return_value = [file]
+
+    def _download(f, dest_dir, *, retry=False):
+        sidecar.unlink(missing_ok=True)
+        return dest
+
+    client.download.side_effect = _download
+    client.__enter__ = lambda s: client
+    client.__exit__ = MagicMock(return_value=False)
+
+    args = MagicMock()
+    args.manual_wifi = False
+    args.keep_awake = False
+    args.retry = True
+
+    # Watermark is ahead of the file date so it won't appear in the normal todo
+    state = {"frontgate": {"Photo": "2026-05-10 14:00:00"}}
+
+    with (
+        patch("bushdump.wifi.current_ssid", return_value="TestCam_AP"),
+        patch("bushdump.camera.CameraClient", return_value=client),
+        patch("bushdump.config.save_state"),
+    ):
+        n, conflicts = cli._sync_one(mock_cam, state, args)
+
+    assert n == 1
+    out = capsys.readouterr().out
+    assert "retry" in out
+
+
 def test_command_aliases_preserve_arguments():
     parser = cli.build_parser()
 

@@ -241,7 +241,7 @@ class CameraClient:
                 self._client.close()
                 self._client = httpx.Client(base_url=self.base_url, timeout=self._timeout)
 
-    def download(self, file: CameraFile, dest_dir: Path) -> Path | None:
+    def download(self, file: CameraFile, dest_dir: Path, *, retry: bool = False) -> Path | None:
         """Stream a file to dest_dir. Returns the saved path, or None if already complete.
 
         Filenames include the camera timestamp, so collisions are extremely
@@ -252,13 +252,16 @@ class CameraClient:
         - identical bytes → camera-side corruption; saves with .error.txt sidecar
         - different bytes, second clean → transit error, silently recovered
         - different bytes, both bad → saves both (.alt copy) with sidecar
+
+        Pass retry=True to re-download even if a sidecar exists; the sidecar is
+        removed on a clean re-download.
         """
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / file.name
         sidecar = _sidecar_path(dest)
 
         if dest.exists():
-            if sidecar.exists() or dest.stat().st_size == file.size:
+            if (sidecar.exists() and not retry) or dest.stat().st_size == file.size:
                 return None
             # Collision: same name, different size, no sidecar → find a free slot.
             stem, _, suffix = file.name.rpartition(".")
@@ -279,6 +282,8 @@ class CameraClient:
         failures = _check_size(tmp, file.size) + validate_media(tmp, file.kind)
         if not failures:
             tmp.replace(dest)
+            if retry:
+                sidecar.unlink(missing_ok=True)
             return dest
 
         # First download failed validation — re-download and compare.
