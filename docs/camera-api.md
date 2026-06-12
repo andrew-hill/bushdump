@@ -86,6 +86,28 @@ Pagination: `/list/detail/forward/<from_id>/<page_size>` returns files with
 Keep-alive: hit `/cmd/standby/reset` every ~20s during a sync, otherwise the
 camera will idle out and drop the AP mid-download.
 
+### Timelapse JPEG metadata
+
+Observed on timelapse-mode JPEGs; absent on manually-triggered captures.
+
+A JPEG COM segment (`FF FE`, 1028 bytes total) is appended **after** the
+standard EOI (`FF D9`). The payload is 1024 bytes: 64 × 16-byte records,
+with the first record all-zero.
+
+Known record fields (little-endian):
+
+| Offset | Type     | Description |
+|--------|----------|-------------|
+| 0      | `uint8`  | `seq` — frame index, 1-based (0 in the first/zero record) |
+| 1      | `uint8`  | `type_flag` — observed values: `0x00`, `0x49`, `0x5a`, `0x90`, `0xee` |
+| 2–3    | `uint16` | padding (zero) |
+| 4–7    | `uint32` | always `0x400` (= 1024) |
+| 8–11   | `uint32` | varies per file — possible per-frame exposure or quality metric |
+| 12–15  | `uint32` | varies per file — possible per-frame exposure or quality metric |
+
+Full field semantics are unknown. `tools/validate-files.py` extracts this block
+to a `<filename>.timelapse.bin` sidecar for offline analysis.
+
 ### `/cmd/format/result` response
 
 Poll until `data.status` (or `data.result`) is one of `"done"`, `"finish"`,

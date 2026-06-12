@@ -9,12 +9,12 @@ from bushdump.validate import validate_media
 
 
 def _jpeg_bytes(width: int = 16, height: int = 16) -> bytes:
-    """Return a real JPEG with colour variation so the visual-scene check passes."""
+    """Return a real JPEG with brightness variation so the dead-sensor check passes."""
     from PIL import Image
 
-    img = Image.new("RGB", (width, height))
-    # Gradient: x→R, y→G keeps the image visually non-uniform even after JPEG quantisation
-    img.putdata([(x * 15, y * 15, 128) for y in range(height) for x in range(width)])
+    img = Image.new("L", (width, height))
+    img.putdata([int(255 * x / (width - 1)) for y in range(height) for x in range(width)])
+    img = img.convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=95)
     return buf.getvalue()
@@ -48,6 +48,15 @@ def test_jpeg_truncated_no_eoi(tmp_path: Path) -> None:
     p.write_bytes(data[:-2])  # strip EOI
     failures = validate_media(p, "JPG")
     assert any("EOI" in f for f in failures)
+
+
+def test_jpeg_timelapse_com_after_eoi(tmp_path: Path) -> None:
+    # Timelapse JPEGs have a 1028-byte COM block appended after EOI — should pass.
+    com_block = b"\xff\xfe" + (1024).to_bytes(2, "big") + b"\x00" * 1024
+    data = _jpeg_bytes() + com_block
+    p = tmp_path / "img.jpg"
+    p.write_bytes(data)
+    assert validate_media(p, "JPG") == []
 
 
 def test_jpeg_garbage_body_fails_pillow(tmp_path: Path) -> None:

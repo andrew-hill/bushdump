@@ -21,7 +21,13 @@ def _check_jpeg_markers(path: Path) -> list[str]:
         except OSError:
             trailer = b""
         if trailer != _JPEG_EOI:
-            failures.append(f"missing JPEG EOI marker (last bytes: {trailer.hex()})")
+            # Some cameras append metadata (e.g. timelapse COM blocks) after EOI.
+            try:
+                fh.seek(-4096, 2)
+            except OSError:
+                fh.seek(0)
+            if _JPEG_EOI not in fh.read():
+                failures.append(f"missing JPEG EOI marker (last bytes: {trailer.hex()})")
     return failures
 
 
@@ -34,46 +40,32 @@ def _check_mp4_ftyp(path: Path) -> list[str]:
     return []
 
 
-def _check_pillow_verify(path: Path) -> list[str]:
+def _check_pillow(path: Path) -> list[str]:
+    """Decode pixels at 1/8 scale and flag degenerate visual content (dead sensor)."""
     try:
         from PIL import Image, UnidentifiedImageError
     except ImportError:
         return []
     try:
         img = Image.open(path)
-        img.verify()
-        return []
+        img.draft("RGB", (64, 64))
+        img.load()
+        thumb = img.resize((64, 64), Image.BOX).convert("HSV")
+        _, _, v_ch = thumb.split()
+        v_lo, v_hi = v_ch.getextrema()
+        if v_lo == v_hi:
+            return ["image is entirely a single brightness (possible dead sensor)"]
     except UnidentifiedImageError as e:
         return [f"Pillow could not identify image: {e}"]
     except Exception as e:
         return [f"Pillow structural check failed: {e}"]
-
-
-def _check_visual_scene(path: Path) -> list[str]:
-    """Decode pixels and flag degenerate visual content (entirely uniform colour)."""
-    try:
-        from PIL import Image
-    except ImportError:
-        return []
-    try:
-        img = Image.open(path)
-        img.load()
-    except Exception as e:
-        return [f"pixel decode failed: {e}"]
-    try:
-        thumb = img.resize((16, 16)).convert("RGB")
-        # getextrema() returns ((rmin, rmax), (gmin, gmax), (bmin, bmax)) for RGB
-        if all(lo == hi for lo, hi in thumb.getextrema()):
-            return ["image is entirely a single colour (possible sensor or corruption artefact)"]
-    except Exception:
-        pass
     return []
 
 
 def validate_media(path: Path, kind: str) -> list[str]:
     """Return a list of failure reasons; empty list means the file looks valid."""
     if kind == "JPG":
-        return _check_jpeg_markers(path) + _check_pillow_verify(path) + _check_visual_scene(path)
+        return _check_jpeg_markers(path) + _check_pillow(path)
     if kind == "MP4":
         return _check_mp4_ftyp(path)
     return []

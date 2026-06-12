@@ -11,6 +11,7 @@ __pycache__/
 /downloads/
 *.jpg
 *.jpeg
+!tests/fixtures/corrupt-jpegs/*.jpg
 *.mp4
 *.avi
 

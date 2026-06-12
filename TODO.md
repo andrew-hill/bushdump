@@ -6,10 +6,14 @@
       genuinely in-sync (e.g. via NTP).
 - [ ] Add more graceful error handling to avoid large trace outputs from reasonably
       expected issues.
-- [ ] Check validity of media files upon download. Self-consistent, ensure they can
-      be loaded/read, no errors while opening, perhaps check validity of visual scene
-      (genuine image, not corrupted/random colours/visual artefacts).
-- [ ] After "Camera Ready" show more status as it progresses (it's slow)
+- [ ] Bring MP4 validation in line with JPEG validation.
+- [ ] Improve JPEG pixel-corruption detection: `corrupt-scan-zeros.jpg` and
+      `corrupt-scan-flip.jpg` in `tests/fixtures/corrupt-jpegs/` currently pass
+      validation because libjpeg's error concealment fills in corrupted MCUs with
+      plausible-looking repeated rows. Would need to detect large runs of identical
+      MCU rows or similar heuristic to catch partial-download / bit-flip corruption.
+- [ ] Add a tool to validate files in place (doesn't need to be part of main bd tool
+      so just in tools/)
 
 ## Next-visit camera smoke tests
 
@@ -22,6 +26,8 @@ Update `docs/camera-models.md` with findings afterwards.
       any `type 2` files, or trigger a recording
 - [ ] Confirm `bd sync` final count is correct and no traceback (was broken by
       an abrupt power-off race; fixed in code — verify next visit)
+- [ ] Try `bd clock east --sync` and record whether `/cmd/setGmtClock` updates
+      `/cmd/info/4` correctly.
 - [ ] review output of `bd settings` (raw log on file: `bd-settings-east.log`;
       `/cmd/getParaSetting` shows valid values for each field)
 
@@ -30,5 +36,7 @@ Update `docs/camera-models.md` with findings afterwards.
 - [ ] Confirm video download — check `bd ls` for type 2 files
 - [ ] Confirm `bd stats` shows a non-zero battery percentage on battery-only
       power (no external solar) — verifies the `voltage`/`battery` fallback
+- [ ] Try `bd clock norw --sync` and record whether `/cmd/setGmtClock` updates
+      `/cmd/info/4` correctly.
 - [ ] review output of `bd settings` (raw log on file: `bd-settings-norw.log`;
       `/cmd/getParaSetting` shows valid values for each field)

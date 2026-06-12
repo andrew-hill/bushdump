@@ -114,3 +114,18 @@ classifies it as unknown), the next step is capturing the manufacturer's
 official app talking to the camera — usually an Android HCI snoop log
 inspected in Wireshark — and figuring out the wake bytes from there. That's
 out of scope for this tool suite.
+
+## `validate-files.py` — validate already-downloaded media
+
+Runs the same checks used during sync on files already on disk (no camera or
+network needed). Writes `.error.txt` sidecars next to any file that fails.
+Files that already have a sidecar are skipped.
+
+Prints a timing summary on exit (or Ctrl+C) showing average time per file —
+useful for gauging how much validation overhead to expect during a real sync.
+
+```bash
+uv run python tools/validate-files.py ~/photos/frontgate/
+uv run python tools/validate-files.py ~/photos/frontgate/*.jpg
+uv run python tools/validate-files.py img1.jpg img2.mp4
+```
