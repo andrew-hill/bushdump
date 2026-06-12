@@ -64,13 +64,14 @@ POST /media/setDayNightMode {"data":{"DayNightMode":<mode>}}  # set day/night mo
 {"id": 1, "type": 1, "date": "2026-05-10 13:00:01", "size": 3109844, "uid": "83b0084b"}
 ```
 
-| Field  | Meaning                                              |
-|--------|------------------------------------------------------|
-| `id`   | numeric file ID; **paginate by using the last `id` as the next `from_id`** |
-| `type` | `1` = photo (JPG), `2` = video (MP4)                 |
-| `date` | local time, format `YYYY-MM-DD HH:MM:SS` (sorts lexicographically) |
-| `size` | bytes                                                |
-| `uid`  | opaque ID; not needed for download                   |
+| Field     | Meaning                                              |
+|-----------|------------------------------------------------------|
+| `id`      | numeric file ID; **paginate by using the last `id` as the next `from_id`** |
+| `type`    | `1` = photo (JPG), `2` = video (MP4)                 |
+| `date`    | local time, format `YYYY-MM-DD HH:MM:SS` (sorts lexicographically) |
+| `size`    | bytes                                                |
+| `uid`     | opaque ID; not needed for download                   |
+| `aitags`  | AI tag payload (e.g. `{"tags":[]}`); not needed for download; safely ignored |
 
 ## Sync logic
 
@@ -132,6 +133,12 @@ firmware revisions:
   `data` (array directly) on others. Check all three before erroring.
 - **File timestamp field name** — most firmware uses `date`; some use `time`.
   Both are `YYYY-MM-DD HH:MM:SS` strings.
+- **`/cmd/info/2` battery field** — most firmware uses `battery` (0–100 %);
+  some use `voltage` (same scale) with a companion `vol_value` (raw mV). Both
+  were seen only on external power, so what they each mean at battery-only
+  levels is unknown. `parse_info2()` tries `battery` first, then `voltage`.
+- **`/cmd/info/4` timezone field** — key may be `tz` or `timezone`; the
+  `clock` value format (`YYYY-MM-DD HH:MM:SS`) is unchanged.
 - **`/cmd/setGmtClock` vs `/cmd/setGmtClock2`** — both set the camera clock
   with the same payload; they exist as separate endpoints for different firmware
   builds of the same camera line (not different models). Try `setGmtClock` first;

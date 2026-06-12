@@ -31,35 +31,47 @@ shape described in `camera-api.md`. Per-model deviations called out below.
   `/cmd/standby/reset`, `/list/detail/forward/0/10`
 - `type` enum seen: `1` (photo). No videos on the SD card yet, so `2`
   unconfirmed but follows the convention.
-- HTTP file download (`/file/<id>/JPG`) not yet exercised end-to-end.
+- HTTP file download (`/file/<id>/JPG`): ✅ confirmed — hundreds of JPGs,
+  ~1.2 MB/s average.
+- Power-off (`/cmd/standby/now`): ✅ confirmed — this model drops the TCP
+  connection before completing the HTTP response; the AP goes down as expected.
+  The resulting `httpx.RemoteProtocolError` is suppressed in `power_off()`.
 
-### GardePro E8 2 — 🟡 Partial
+### GardePro E8 2.0 Pro — ✅ Confirmed
 
 - BLE peripheral name: `CAM8Z8_<location>_G_E8 2`
-- WiFi SSID: `CAM8Z8_<wifi-mac-hex>` (e.g. `CAM8Z8_A4C13896B3B0`)
+- WiFi SSID: `CAM8Z8_<wifi-mac-hex>`
 - WPA2: `1234567890` ✅
-- Hardware: `LK8625_V1.6`, firmware `v1.0.5`, manufacturer Shenzhen Linkiing
-  Technology Co.,Ltd.
+- `/cmd/info/1`: `{"brand":"GardePro","product":"E8 2.0 Pro","model":"E8V2P","ver":"V9.2.108 MCU V2.67"}`
+- `/cmd/info/5` hardware: `h/w 9.4.9.2S.2`, BLE module `TL_v1.0.5_2025.01.08`
 - BLE wake char: `6e400004-b5a3-f393-e0a9-e50e24dcca9e`, same as E6PMB.
-  **Does not send `OK\r\n` ack** — the "no ack" message from `bd wake` is
-  normal; the AP still comes up.
-- ⚠️ **Wake reliability unclear**: required multiple `bd wake` attempts before
-  the AP appeared in practice. Unclear if this is a timing issue (the AT
-  command needs repeating), a BLE connection race, or something else. Worth
-  investigating whether retrying the write or adding a delay helps.
-- HTTP file listing (`/list/detail/forward/`): ✅ confirmed — 2152 photos
-  listed correctly
-- HTTP photo download (`/file/<id>/JPG`): ✅ confirmed — 1–3 MB JPGs,
-  0.7–2.8 MB/s (avg ~1.1 MB/s)
+  Confirmed `OK\r\n` reply via `--probe-all` (consistent across two separate
+  sessions). The CLI sometimes shows "(no ack)" — this is a 3s notification
+  timeout, not a failure; the AP comes up regardless.
+- **Wake reliability**: BLE `connect()` occasionally times out on the first
+  attempt (macOS CoreBluetooth race); a second attempt always succeeds. This
+  is a BLE distance/timing issue, not a characteristic mismatch.
+- HTTP confirmed: `/cmd/info/1..5`, `/cmd/getSetting`, `/cmd/getParaSetting`,
+  `/cmd/standby/reset`, `/list/detail/forward/`
+- `/cmd/info/2` field variation: uses `voltage` (0–100 scale) and
+  `vol_value` (raw mV) instead of `battery`. Both were observed on external
+  power, so the meaning at battery-only levels is still unknown. `parse_info2`
+  falls back to `voltage` automatically.
+- `/cmd/info/4` field variation: uses key `tz` (not `timezone`) for timezone.
+- `/cmd/getSetting` has extra fields vs E6PMB: `sound_level`,
+  `false_trigger_suppression`, `auxiliary_pir`, `tl_hours_sw1`,
+  `temperature_format`, `cellular`, `instant_upload`, `cellular_interval`,
+  `cellular_start_time`, `gps_start_time`, `thumbnail_quality`,
+  `cell_hd_quality`, `cellular_instant`.
+- HTTP photo download (`/file/<id>/JPG`): ✅ confirmed — 1127 JPGs in a
+  single run, ~1.4 MB/s average.
 - Keep-alive (`/cmd/standby/reset`): ✅ confirmed — held connection across
-  hundreds of files over multiple hours
-- Resume/watermark: ✅ confirmed — sync interrupted by `httpx.ReadTimeout`
-  (laptop sleep) and resumed correctly from the last completed file
-- Videos: ❓ not confirmed — no videos on SD card during test
-- Power-off (`/cmd/standby/now`): ❓ not confirmed — sync crashed before
-  clean exit
-- HTTP info endpoints (`/cmd/info/1..5`, `/cmd/getSetting` etc.): ❓ not
-  probed; assumed identical to E6PMB
+  thousands of files over multiple hours.
+- Resume/watermark: ✅ confirmed — interrupted and resumed correctly from
+  the last completed file.
+- Power-off (`/cmd/standby/now`): ✅ confirmed — this model completes the
+  HTTP response cleanly before the AP drops.
+- Videos: ❓ not confirmed — no videos on SD card during test.
 
 ### GardePro E9P — 📚 Reported
 

@@ -267,6 +267,7 @@ def cmd_keepalive(args: argparse.Namespace) -> int:
 def cmd_sync(args: argparse.Namespace) -> int:
     global _log_file, _verbose
     import httpx
+
     from bushdump import ble
 
     _verbose = args.verbose
@@ -330,8 +331,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 if all_conflicts:
                     _out_conflicts(all_conflicts)
                 return 1
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError,
-                    RuntimeError):
+            except (
+                httpx.ConnectError,
+                httpx.TimeoutException,
+                httpx.RemoteProtocolError,
+                RuntimeError,
+            ):
                 lines = traceback.format_exc().strip().splitlines()
                 _out("\n".join(lines[-4:]), err=True)
                 failed = True
@@ -388,7 +393,8 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
             watermark = cam_state.get(media)
             available = [f for f in all_files if f.type == type_code]
             todo = sync.files_to_download(available, watermark)
-            _out(f"{media}: {len(todo)} new of {len(available)}")
+            truly_new = sum(1 for f in todo if watermark is None or f.date > watermark)
+            _out(f"{media}: {truly_new} new of {len(available)}")
             todo_bytes = sum(f.size for f in todo)
             done_bytes = 0
             avg_bytes = 0
@@ -498,7 +504,8 @@ def cmd_ble(args: argparse.Namespace) -> int:
     except BleakBluetoothNotAvailableError:
         print(
             "Bluetooth unavailable — check macOS Privacy & Security settings.\n"
-            "To sync without BLE: manually join the camera's WiFi AP, then run `bushdump sync --manual-wifi`.",
+            "To sync without BLE: manually join the camera's WiFi AP,"
+            " then run `bushdump sync --manual-wifi`.",
             file=sys.stderr,
         )
         return 1
@@ -539,9 +546,9 @@ def cmd_wake(args: argparse.Namespace) -> int:
 
 def _wake_and_report(address: str, label: str) -> None:
     """Wake the camera by address, printing the camera's ack on success."""
-    from bushdump import ble
-
     from bleak.exc import BleakBluetoothNotAvailableError
+
+    from bushdump import ble
 
     _out(f"Waking {label} over BLE to bring its WiFi up...")
     try:

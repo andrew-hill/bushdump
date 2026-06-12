@@ -4,41 +4,31 @@
       Consider doing automatically upon any connection if time is out-of-sync,
       or via user-prompt to confirm, subject to a signal that the client is
       genuinely in-sync (e.g. via NTP).
-- [ ] Add command to read + display camera settings/configuration.
-      Consider any/all available settings (check method in github.com/fede2cr/camtrap-control/
-      and probe each camera for variations by model/firmware)
-- [ ] Add appropriate credits to README.md for info + code sourced from other users
-      (license-appropriate, or in the spirit of BSD/MIT-style license or academic
-      reference where repos lack a license)
 - [ ] Add more graceful error handling to avoid large trace outputs from reasonably
       expected issues.
+- [ ] Check validity of media files upon download. Self-consistent, ensure they can
+      be loaded/read, no errors while opening, perhaps check validity of visual scene
+      (genuine image, not corrupted/random colours/visual artefacts).
+- [ ] After "Camera Ready" show more status as it progresses (it's slow)
 
 ## Next-visit camera smoke tests
 
 Things to confirm on hardware next time each camera is in range.
 Update `docs/camera-models.md` with findings afterwards.
 
-### GardePro E6PMB (frontgate)
+### GardePro E6PMB
 
-- [ ] Confirm file download works end-to-end (`bd sync frontgate` to completion
-      and verify files land on disk) — the doc still says "not yet exercised"
-- [ ] Confirm video download — need videos on the SD card; check `bd ls
-      frontgate` for any `type 2` files, or trigger a recording
-- [ ] Confirm clean power-off — let a sync finish normally and verify the
-      camera's WiFi drops (currently inferred, not observed)
-- [ ] Run `bd stats frontgate` and confirm battery/SD output is sensible
+- [ ] Confirm video download — need videos on the SD card; check `bd ls` for
+      any `type 2` files, or trigger a recording
+- [ ] Confirm `bd sync` final count is correct and no traceback (was broken by
+      an abrupt power-off race; fixed in code — verify next visit)
+- [ ] review output of `bd settings` (raw log on file: `bd-settings-east.log`;
+      `/cmd/getParaSetting` shows valid values for each field)
 
-### GardePro E8 2 (norw)
+### GardePro E8 2.0 Pro
 
-- [ ] Investigate wake reliability — try `tools/wake.py` several times in
-      a row, note whether it always needs multiple attempts or was a one-off;
-      try `tools/wake.py --probe-all` to see if another characteristic responds
-      more reliably
-- [ ] Run `tools/probe-http.py` while on its AP — confirms `/cmd/info/1..5`,
-      `/cmd/getSetting`, and the full HTTP shape match E6PMB
-- [ ] Run `bd stats norw` — quick sanity check of battery and SD
-- [ ] Confirm clean power-off — let `bd sync norw` finish without interruption
-      and verify WiFi drops
-- [ ] Confirm video download — check `bd ls norw` for type 2 files
-- [ ] Try `bd register` for norw from scratch (once wake is reliable) to
-      confirm the guided flow works end-to-end for this model
+- [ ] Confirm video download — check `bd ls` for type 2 files
+- [ ] Confirm `bd stats` shows a non-zero battery percentage on battery-only
+      power (no external solar) — verifies the `voltage`/`battery` fallback
+- [ ] review output of `bd settings` (raw log on file: `bd-settings-norw.log`;
+      `/cmd/getParaSetting` shows valid values for each field)

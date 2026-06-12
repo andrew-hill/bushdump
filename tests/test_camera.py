@@ -53,6 +53,18 @@ def test_parse_info2_bad_shape():
     assert parse_info2("garbage") == (0, 0, False)
 
 
+def test_parse_info2_voltage_fallback():
+    # E8 2.0 Pro firmware reports "voltage" instead of "battery"; ext_power is an int
+    data = {
+        "code": 0,
+        "data": {"voltage": 100, "vol_value": 4182, "temperature": 21, "ext_power": 2},
+    }
+    battery, temp, ext = parse_info2(data)
+    assert battery == 100
+    assert temp == 21
+    assert ext is True
+
+
 def test_parse_info3_nominal():
     data = {"code": 0, "data": {"total": 32000, "used": 8192, "photo": 120, "video": 5}}
     total, used, photos, videos = parse_info3(data)

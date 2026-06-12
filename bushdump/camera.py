@@ -6,6 +6,7 @@ HTTP on its own WiFi AP (default 192.168.8.1:8080).
 
 from __future__ import annotations
 
+import contextlib
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,7 +65,7 @@ def parse_info2(data: object) -> tuple[int, int, bool]:
         return 0, 0, False
     d = data.get("data") or {}
     return (
-        int(d.get("battery", 0) or 0),
+        int(d.get("battery") or d.get("voltage") or 0),
         int(d.get("temperature", 0) or 0),
         bool(d.get("ext_power", False)),
     )
@@ -278,8 +279,10 @@ class CameraClient:
         resp = self._client.get("/cmd/getSetting")
         resp.raise_for_status()
         body = resp.json()
-        if not isinstance(body, dict) or body.get("code") != 0 or not isinstance(
-            body.get("data"), dict
+        if (
+            not isinstance(body, dict)
+            or body.get("code") != 0
+            or not isinstance(body.get("data"), dict)
         ):
             raise RuntimeError(f"Unexpected response from /cmd/getSetting: {body!r}")
         return body["data"]
@@ -297,5 +300,12 @@ class CameraClient:
         self._client.post("/cmd/setGmtClock", json={"data": payload})
 
     def power_off(self) -> None:
-        """Turn the camera's WiFi off (saves its battery)."""
-        self._client.get("/cmd/standby/now")
+        """Turn the camera's WiFi off (saves its battery).
+
+        Some models drop the TCP connection before sending an HTTP response;
+        suppress those errors — the command still reached the camera.
+        """
+        import httpx
+
+        with contextlib.suppress(httpx.RemoteProtocolError, httpx.ConnectError):
+            self._client.get("/cmd/standby/now")
