@@ -95,6 +95,7 @@ Location permission; falls back to manual SSID entry otherwise.
 - **DRY / small functions / clear names.** One responsibility per module.
 - **Campsite rule**: leave code better than you found it.
 - **No dead code**: delete it, don't comment it out. Pre-launch, no legacy.
+- **No dead TODO items**: remove completed items from `TODO.md` outright — don't tick them off and leave them.
 - **Errors are explicit**: the camera is flaky hardware — handle timeouts,
   connection drops, and partial downloads deliberately. Resumable/idempotent
   where it matters.
@@ -128,3 +129,13 @@ Location permission; falls back to manual SSID entry otherwise.
 The device API (endpoints, BLE wake sequence, sync semantics) is documented in
 [`docs/camera-api.md`](docs/camera-api.md). Read it before touching `camera.py`
 or `ble.py`.
+
+Keep `docs/camera-api.md` and `docs/camera-models.md` up to date as we learn
+new things about how the cameras behave — confirmed endpoints, field variations,
+timing quirks, power-off behaviour, etc. When updating these docs:
+
+- **Use**: camera model names/numbers (E6PMB, E8 2.0 Pro), firmware versions,
+  hardware identifiers, MAC address patterns, and protocol-level strings
+  (SSIDs like `CAM8Z8_<mac>`, BLE peripheral names like `CAM8Z8_<loc>_G_E6PMB`).
+- **Omit**: user-assigned camera names (`east`, `norw`), local directory paths,
+  specific physical locations, and any personal information.

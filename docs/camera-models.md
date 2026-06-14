@@ -32,7 +32,10 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - `type` enum seen: `1` (photo). No videos on the SD card yet, so `2`
   unconfirmed but follows the convention.
 - HTTP file download (`/file/<id>/JPG`): ✅ confirmed — hundreds of JPGs,
-  ~1.2 MB/s average.
+  ~1.1 MB/s average.
+- Sync to completion: ✅ confirmed — 2572 photos, clean final count, no traceback.
+- Clock sync (`/cmd/setGmtClock` + `/cmd/info/4`): ✅ confirmed — camera was ~3s
+  ahead of laptop; after `bd clock --sync` the clock updated correctly and held.
 - Power-off (`/cmd/standby/now`): ✅ confirmed — this model drops the TCP
   connection before completing the HTTP response; the AP goes down as expected.
   The resulting `httpx.RemoteProtocolError` is suppressed in `power_off()`.
@@ -64,11 +67,14 @@ shape described in `camera-api.md`. Per-model deviations called out below.
   `cellular_start_time`, `gps_start_time`, `thumbnail_quality`,
   `cell_hd_quality`, `cellular_instant`.
 - HTTP photo download (`/file/<id>/JPG`): ✅ confirmed — 1127 JPGs in a
-  single run, ~1.4 MB/s average.
+  single run, ~1.4–1.7 MB/s average.
+- Sync to completion: ✅ confirmed — 2569 photos, clean final count, no traceback.
 - Keep-alive (`/cmd/standby/reset`): ✅ confirmed — held connection across
   thousands of files over multiple hours.
 - Resume/watermark: ✅ confirmed — interrupted and resumed correctly from
   the last completed file.
+- Clock sync (`/cmd/setGmtClock` + `/cmd/info/4`): ✅ confirmed — camera was ~29s
+  behind laptop; after `bd clock --sync` the clock updated correctly and held.
 - Power-off (`/cmd/standby/now`): ✅ confirmed — this model completes the
   HTTP response cleanly before the AP drops.
 - Videos: ❓ not confirmed — no videos on SD card during test.
