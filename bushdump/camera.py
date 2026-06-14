@@ -63,6 +63,47 @@ class CameraStats:
     video_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class TimeInfo:
+    """Parsed /cmd/info/4 clock + timezone."""
+
+    clock_utc: datetime  # camera's local clock converted to UTC
+    tz_minutes: int | None  # UTC offset in minutes; None if not reported
+
+
+def parse_info4(data: object) -> TimeInfo | None:
+    """Parse /cmd/info/4 → TimeInfo. Best-effort; returns None on unrecognised shape.
+
+    The camera reports local time in `clock` (YYYY-MM-DD HH:MM:SS) and a UTC
+    offset in minutes under either `tz` or `timezone`. We subtract the offset
+    to get UTC so callers can compare directly to datetime.now(UTC).
+    """
+    if not isinstance(data, dict):
+        return None
+    d = data.get("data") or {}
+    clock_str = d.get("clock")
+    if not clock_str:
+        return None
+    try:
+        local_dt = datetime.strptime(str(clock_str), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    tz_raw = d.get("tz") if "tz" in d else d.get("timezone")
+    tz_minutes: int | None = None
+    if tz_raw is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            tz_minutes = int(tz_raw)
+    from datetime import timedelta, timezone
+
+    if tz_minutes is not None:
+        aware = local_dt.replace(tzinfo=timezone(timedelta(minutes=tz_minutes)))
+        clock_utc = aware.astimezone(UTC)
+    else:
+        # No tz info — assume clock is already UTC (best guess)
+        clock_utc = local_dt.replace(tzinfo=UTC)
+    return TimeInfo(clock_utc=clock_utc, tz_minutes=tz_minutes)
+
+
 def parse_info2(data: object) -> tuple[int, int, bool]:
     """Parse /cmd/info/2 → (battery %, temperature °C, ext_power). Best-effort."""
     if not isinstance(data, dict):
@@ -391,6 +432,10 @@ class CameraClient:
         Response shape varies by firmware — returned as-is for the caller to inspect.
         """
         return self._client.get("/cmd/info/4").json()
+
+    def parsed_time_info(self) -> TimeInfo | None:
+        """Return parsed /cmd/info/4 clock as a TimeInfo, or None on unrecognised shape."""
+        return parse_info4(self.time_info())
 
     def set_clock(self, when: datetime) -> None:
         """Set camera clock via POST /cmd/setGmtClock. Pass a UTC datetime."""

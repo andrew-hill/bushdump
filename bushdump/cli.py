@@ -7,7 +7,6 @@ Heavy deps (bleak, httpx) are imported lazily inside command handlers so that
 from __future__ import annotations
 
 import argparse
-import argcomplete
 import asyncio
 import datetime
 import functools
@@ -16,9 +15,15 @@ import sys
 import time
 import traceback
 from collections.abc import Callable
-from typing import IO
+from typing import IO, TYPE_CHECKING
+
+import argcomplete
 
 from bushdump import __version__, config, sync
+
+if TYPE_CHECKING:
+    from bushdump import health
+    from bushdump.camera import CameraClient
 
 MEDIA_TYPES = ("Photo", "Video")
 _MEDIA_TYPE_CODE = {"Photo": 1, "Video": 2}
@@ -41,6 +46,17 @@ def _vout(msg: str = "") -> None:
         print(msg, file=_log_file)
     if _verbose:
         print(msg)
+
+
+def _ansi(text: str, code: str) -> str:
+    if sys.stdout.isatty():
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+def _warn_line(w: health.Warning) -> None:
+    code = "1;33" if w.level == "warn" else "1;31"
+    _out(_ansi(f"  ! {w.message}", code), err=True)
 
 
 def _out_conflicts(conflicts: list[str]) -> None:
@@ -100,6 +116,62 @@ def _handle_expected_camera_errors(
     return wrapper
 
 
+def _prompt_clock_sync_with_timeout(
+    client: CameraClient, drift_secs: float, timeout: float = 5.0
+) -> None:
+    """Offer to sync the camera clock now; auto-No after `timeout` seconds."""
+    import select
+
+    prompt = f"  Set camera clock now? [y/N] (auto-No in {timeout:.0f}s) "
+    _out(prompt, err=True)
+    try:
+        if not sys.stderr.isatty() or not select.select([sys.stdin], [], [], timeout)[0]:
+            _out("  (timed out — skipping clock sync)", err=True)
+            return
+        answer = sys.stdin.readline().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        _out("\n  (cancelled — skipping clock sync)", err=True)
+        return
+    if answer != "y":
+        return
+    from datetime import UTC
+
+    now_utc = datetime.datetime.now(UTC)
+    client.set_clock(now_utc)
+    from bushdump.camera import parse_info4
+
+    ti = parse_info4(client.time_info())
+    if ti is not None:
+        residual = abs((ti.clock_utc - datetime.datetime.now(UTC)).total_seconds())
+        _out(f"  Clock set. Residual drift: {residual:.0f}s", err=True)
+    else:
+        _out("  Clock set.", err=True)
+
+
+def _run_health_checks(
+    client: CameraClient,
+    cam: config.Camera,
+    *,
+    interactive: bool,
+) -> None:
+    from bushdump import health
+
+    stats = client.stats()
+    time_info = client.parsed_time_info()
+    warnings = health.evaluate(
+        stats,
+        time_info,
+        expect_ext_power=cam.expect_ext_power,
+    )
+    for w in warnings:
+        _warn_line(w)
+    if interactive and time_info is not None:
+        clock_warnings = [w for w in warnings if w.code == "clock_drift"]
+        if clock_warnings:
+            drift = (time_info.clock_utc - datetime.datetime.now(datetime.UTC)).total_seconds()
+            _prompt_clock_sync_with_timeout(client, drift)
+
+
 def cmd_cameras(args: argparse.Namespace) -> int:
     cfg = config.load_config()
     if not cfg.cameras:
@@ -155,14 +227,15 @@ def cmd_stats(args: argparse.Namespace) -> int:
             return 1
         print("Camera ready.")
         s = client.stats()
-    sd_pct = round(s.sd_used_kb / s.sd_total_kb * 100) if s.sd_total_kb else 0
-    sd_used_gb = s.sd_used_kb / (1024 * 1024)
-    sd_total_gb = s.sd_total_kb / (1024 * 1024)
-    ext = "  (ext power)" if s.ext_power else ""
-    print(f"Battery:     {s.battery}%{ext}")
-    print(f"Temperature: {s.temperature}°C")
-    print(f"SD card:     {sd_used_gb:.1f} / {sd_total_gb:.1f} GB used ({sd_pct}%)")
-    print(f"Files:       {s.photo_count} photos, {s.video_count} videos")
+        sd_pct = round(s.sd_used_kb / s.sd_total_kb * 100) if s.sd_total_kb else 0
+        sd_used_gb = s.sd_used_kb / (1024 * 1024)
+        sd_total_gb = s.sd_total_kb / (1024 * 1024)
+        ext = "  (ext power)" if s.ext_power else ""
+        print(f"Battery:     {s.battery}%{ext}")
+        print(f"Temperature: {s.temperature}°C")
+        print(f"SD card:     {sd_used_gb:.1f} / {sd_total_gb:.1f} GB used ({sd_pct}%)")
+        print(f"Files:       {s.photo_count} photos, {s.video_count} videos")
+        _run_health_checks(client, cam, interactive=False)
     return 0
 
 
@@ -418,6 +491,7 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
             _out(f"  {cam.name}: camera did not respond over HTTP — skipping.", err=True)
             return 0, []
         _out("Camera ready.")
+        _run_health_checks(client, cam, interactive=True)
 
         cam_state = state.setdefault(cam.name, {})
         conflicts: list[str] = []

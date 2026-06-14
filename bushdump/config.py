@@ -47,6 +47,7 @@ class Camera:
     camera_host: str
     output_dir: Path
     ble_address: str | None = None
+    expect_ext_power: bool = False
 
 
 @dataclass(slots=True)
@@ -75,6 +76,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
             camera_host=section.get("camera_host", default_host),
             output_dir=output_dir,
             ble_address=section.get("ble_address") or None,
+            expect_ext_power=bool(section.get("expect_ext_power", False)),
         )
     return Config(cameras=cameras)
 

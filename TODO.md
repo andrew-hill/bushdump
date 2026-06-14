@@ -1,8 +1,5 @@
 # TODO
 
-- [ ] Integrate clock sync into `bd sync` — `bd clock --sync` works standalone;
-      consider auto-syncing on each connection if the clock is out-of-sync
-      (subject to NTP confidence check), or at least prompting the user.
 - [ ] Add more graceful error handling to avoid large trace outputs from reasonably
       expected issues.
 - [ ] Bring MP4 validation in line with JPEG validation.
@@ -24,6 +21,21 @@
       (it's below the watermark).
 - [ ] Run `bd sync --retry` — confirm the file is re-downloaded, `[retry]` appears
       in the output line, and the sidecar is gone afterwards.
+
+### Health checks
+
+- [ ] After a normal sync, confirm no `! Camera clock is Xs ...` line appears.
+      If it fires immediately, the `/cmd/info/4` tz key is being misread — run
+      `bd clock <name>` and compare the raw JSON offset to the laptop time.
+- [ ] With a camera on solar/ext power (reporting 0% battery), confirm no
+      battery-low warning fires (`check_battery` suppresses 0%).
+- [ ] Run `bd sync <name> --log auto` and inspect the log file: warning lines
+      should be plain `  ! ...` with no ANSI escape codes; on the terminal they
+      should appear yellow (warn) or red (alert).
+- [ ] If a clock-drift warning fires, verify the 5-second auto-No: let the
+      prompt time out and confirm sync continues without setting the clock.
+- [ ] Confirm `bd stats` completes without error even if `/cmd/info/4` returns
+      an unexpected shape — clock check should be silently skipped, not fatal.
 
 Things to confirm on hardware next time each camera is in range.
 Update `docs/camera-models.md` with findings afterwards.

@@ -1,7 +1,19 @@
 from unittest.mock import MagicMock, patch
 
 from bushdump import cli
-from bushdump.camera import CameraFile
+from bushdump.camera import CameraFile, CameraStats
+
+
+def _healthy_stats() -> CameraStats:
+    return CameraStats(
+        battery=80,
+        temperature=22,
+        ext_power=False,
+        sd_total_kb=128 * 1024 * 1024,
+        sd_used_kb=10 * 1024 * 1024,
+        photo_count=0,
+        video_count=0,
+    )
 
 
 def test_command_aliases_resolve_to_canonical_handlers():
@@ -183,8 +195,12 @@ def test_sync_warns_on_corrupt_download(tmp_path, capsys):
     client.wait_until_ready.return_value = True
     client.list_all_files.return_value = [file]
     client.download.return_value = dest
+    client.stats.return_value = _healthy_stats()
+    client.parsed_time_info.return_value = None
     client.__enter__ = lambda s: client
     client.__exit__ = MagicMock(return_value=False)
+
+    mock_cam.expect_ext_power = False
 
     args = MagicMock()
     args.manual_wifi = False
@@ -219,6 +235,8 @@ def test_sync_retry_rerequests_sidecar_files(tmp_path, capsys):
     client = MagicMock()
     client.wait_until_ready.return_value = True
     client.list_all_files.return_value = [file]
+    client.stats.return_value = _healthy_stats()
+    client.parsed_time_info.return_value = None
 
     def _download(f, dest_dir, *, retry=False):
         sidecar.unlink(missing_ok=True)
@@ -227,6 +245,8 @@ def test_sync_retry_rerequests_sidecar_files(tmp_path, capsys):
     client.download.side_effect = _download
     client.__enter__ = lambda s: client
     client.__exit__ = MagicMock(return_value=False)
+
+    mock_cam.expect_ext_power = False
 
     args = MagicMock()
     args.manual_wifi = False
