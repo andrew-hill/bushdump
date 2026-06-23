@@ -11,7 +11,7 @@ import filecmp
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 from bushdump.validate import validate_media
@@ -74,9 +74,15 @@ class TimeInfo:
 def parse_info4(data: object) -> TimeInfo | None:
     """Parse /cmd/info/4 → TimeInfo. Best-effort; returns None on unrecognised shape.
 
-    The camera reports local time in `clock` (YYYY-MM-DD HH:MM:SS) and a UTC
-    offset in minutes under either `tz` or `timezone`. We subtract the offset
-    to get UTC so callers can compare directly to datetime.now(UTC).
+    The camera reports local time in `clock` (YYYY-MM-DD HH:MM:SS) plus a
+    timezone under either `tz` or `timezone`. The timezone is reported in one of
+    two forms across firmware builds:
+
+      * a numeric UTC offset in minutes, e.g. `600` (== UTC+10), or
+      * an IANA zone name, e.g. `"Australia/Sydney"`.
+
+    We resolve whichever form to UTC so callers can compare directly to
+    datetime.now(UTC), and expose the effective offset as `tz_minutes`.
     """
     if not isinstance(data, dict):
         return None
@@ -89,19 +95,35 @@ def parse_info4(data: object) -> TimeInfo | None:
     except ValueError:
         return None
     tz_raw = d.get("tz") if "tz" in d else d.get("timezone")
-    tz_minutes: int | None = None
-    if tz_raw is not None:
-        with contextlib.suppress(TypeError, ValueError):
-            tz_minutes = int(tz_raw)
-    from datetime import timedelta, timezone
-
-    if tz_minutes is not None:
-        aware = local_dt.replace(tzinfo=timezone(timedelta(minutes=tz_minutes)))
-        clock_utc = aware.astimezone(UTC)
+    tz = _resolve_tz(tz_raw)
+    if tz is not None:
+        aware = local_dt.replace(tzinfo=tz)
+        offset = aware.utcoffset()
+        tz_minutes = round(offset.total_seconds() / 60) if offset is not None else None
     else:
-        # No tz info — assume clock is already UTC (best guess)
-        clock_utc = local_dt.replace(tzinfo=UTC)
-    return TimeInfo(clock_utc=clock_utc, tz_minutes=tz_minutes)
+        # No usable tz info — assume the clock is already UTC (best guess).
+        aware = local_dt.replace(tzinfo=UTC)
+        tz_minutes = None
+    return TimeInfo(clock_utc=aware.astimezone(UTC), tz_minutes=tz_minutes)
+
+
+def _resolve_tz(tz_raw: object) -> tzinfo | None:
+    """Resolve the camera's reported timezone to a tzinfo, or None if unusable.
+
+    `tz_raw` may be a numeric minute offset (int or numeric string), an IANA zone
+    name like "Australia/Sydney", or absent/garbage.
+    """
+    if tz_raw is None:
+        return None
+    # Numeric offset in minutes.
+    with contextlib.suppress(TypeError, ValueError):
+        return timezone(timedelta(minutes=int(tz_raw)))
+    # IANA zone name.
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    with contextlib.suppress(ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo(str(tz_raw))
+    return None
 
 
 def parse_info2(data: object) -> tuple[int, int, bool]:

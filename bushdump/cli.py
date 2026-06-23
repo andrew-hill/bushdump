@@ -185,19 +185,39 @@ def cmd_cameras(args: argparse.Namespace) -> int:
     return 0
 
 
-def _wake_join(cam: config.Camera) -> None:
-    """BLE-wake then WiFi-join a camera (shared by stats/ls)."""
+def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
+    """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync).
+
+    The camera's BLE wake is flaky: it can silently no-op, leaving the AP off so
+    the join never finds the network. We retry wake+join as a unit — re-waking
+    between tries is what clears most transient failures, so each join gets a
+    shorter timeout and we loop rather than waiting out one long join.
+    """
     from bushdump import wifi
 
     if cam.ssid and wifi.current_ssid() == cam.ssid:
-        print(f"Already on '{cam.ssid}' — skipping wake+join.")
+        _out(f"Already on '{cam.ssid}' — skipping wake+join.")
         return
-    if cam.ble_address:
+
+    if not cam.ble_address:
+        _out("No BLE address configured — skipping wake (turn WiFi on yourself).")
+        _out(f"Joining WiFi '{cam.ssid}'...")
+        wifi.join(cam.ssid, cam.password)
+        return
+
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
         _wake_and_report(cam.ble_address, cam.name)
-    else:
-        print("No BLE address configured — skipping wake (turn WiFi on yourself).")
-    print(f"Joining WiFi '{cam.ssid}'...")
-    wifi.join(cam.ssid, cam.password)
+        _out(f"Joining WiFi '{cam.ssid}'...")
+        try:
+            wifi.join(cam.ssid, cam.password, timeout=15.0)
+            return
+        except RuntimeError as e:
+            last_err = e
+            if attempt < attempts:
+                _out(f"  (attempt {attempt}/{attempts} couldn't reach the AP — re-waking)")
+    assert last_err is not None
+    raise last_err
 
 
 def _resolve_camera(name: str) -> config.Camera | None:
@@ -467,22 +487,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tuple[int, list[str]]:
-    from bushdump import wifi
     from bushdump.camera import CameraClient
 
     _out(f"\n=== {cam.name} ===")
 
     if args.manual_wifi:
         input(f"Join WiFi '{cam.ssid}' (password: {cam.password}), then press Enter...")
-    elif cam.ssid and wifi.current_ssid() == cam.ssid:
-        _out(f"Already on '{cam.ssid}' — skipping wake+join.")
     else:
-        if cam.ble_address:
-            _wake_and_report(cam.ble_address, cam.name)
-        else:
-            _out("No BLE address configured — skipping wake (turn WiFi on yourself).")
-        _out(f"Joining WiFi '{cam.ssid}'...")
-        wifi.join(cam.ssid, cam.password)
+        _wake_join(cam)
 
     downloaded_count = 0
     with CameraClient(cam.camera_host) as client:

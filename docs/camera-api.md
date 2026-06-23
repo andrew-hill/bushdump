@@ -33,8 +33,8 @@ the HTTP server is up as soon as the AP is.
 GET /cmd/info/1                          # brand/product/version
 GET /cmd/info/2                          # battery, temperature, ext power
 GET /cmd/info/3                          # SD: total/used, photo/video count
-GET /cmd/info/4                          # clock + timezone (response shape TBC from hardware)
-POST /cmd/setGmtClock {"data":"YYYY-MM-DD HH:MM:SS"}   # set clock (firmware variant A)
+GET /cmd/info/4                          # clock + timezone, e.g. {"clock":"2026-06-14 16:58:55","tz":"Australia/Sydney"}
+POST /cmd/setGmtClock {"data":"YYYY-MM-DD HH:MM:SS"}   # set clock in UTC; camera applies tz for display (firmware variant A)
 POST /cmd/setGmtClock2 {"data":"YYYY-MM-DD HH:MM:SS"}  # set clock (firmware variant B)
 GET /cmd/info/5                          # extended HW/FW/BLE/battery info
 GET /cmd/getSetting                      # all user-facing settings
@@ -163,7 +163,12 @@ firmware revisions:
   were seen only on external power, so what they each mean at battery-only
   levels is unknown. `parse_info2()` tries `battery` first, then `voltage`.
 - **`/cmd/info/4` timezone field** — key may be `tz` or `timezone`; the
-  `clock` value format (`YYYY-MM-DD HH:MM:SS`) is unchanged.
+  `clock` value format (`YYYY-MM-DD HH:MM:SS`) is unchanged. `clock` is **local
+  time**, and the tz is reported in one of two forms across firmware builds: an
+  IANA zone name (`"Australia/Sydney"`, seen on E6PMB hardware) or a numeric UTC
+  offset in minutes (`600`). `parse_info4()` handles both and converts to UTC.
+  `setGmtClock` takes a **UTC** time; the camera re-applies its tz for display,
+  so after setting UTC the `clock` field reads back as local time.
 - **`/cmd/setGmtClock` vs `/cmd/setGmtClock2`** — both set the camera clock
   with the same payload; they exist as separate endpoints for different firmware
   builds of the same camera line (not different models). Try `setGmtClock` first;

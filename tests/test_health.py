@@ -233,6 +233,23 @@ def test_parse_info4_with_timezone_key():
     assert ti.clock_utc == datetime(2026, 6, 14, 15, 30, 0, tzinfo=UTC)
 
 
+def test_parse_info4_with_iana_tz_name():
+    # Real hardware reports an IANA zone name, not a numeric offset.
+    data = {"code": 0, "data": {"clock": "2026-06-14 16:58:55", "tz": "Australia/Sydney"}}
+    ti = parse_info4(data)
+    assert ti is not None
+    # Australia/Sydney is UTC+10 in June (no DST in winter).
+    assert ti.tz_minutes == 600
+    assert ti.clock_utc == datetime(2026, 6, 14, 6, 58, 55, tzinfo=UTC)
+
+
+def test_parse_info4_unknown_iana_name_falls_back_to_utc():
+    data = {"code": 0, "data": {"clock": "2026-06-14 10:30:00", "tz": "Mars/Olympus_Mons"}}
+    ti = parse_info4(data)
+    assert ti is not None
+    assert ti.clock_utc == datetime(2026, 6, 14, 10, 30, 0, tzinfo=UTC)
+
+
 def test_parse_info4_no_tz():
     data = {"code": 0, "data": {"clock": "2026-06-14 10:30:00"}}
     ti = parse_info4(data)
