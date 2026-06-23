@@ -8,7 +8,10 @@
       validation because libjpeg's error concealment fills in corrupted MCUs with
       plausible-looking repeated rows. Would need to detect large runs of identical
       MCU rows or similar heuristic to catch partial-download / bit-flip corruption.
-
+- [ ] Add deletion of old files on the SD card. I want to guard this strongly against
+      data loss, e.g. getting the user to specify a date to which they have backed up
+      files (only older ones are deleted). And for confirmation at time of deletion,
+      also check the sizes/dates/IDs match (best verification we can without re-download).
 
 ## Next-visit camera smoke tests
 
@@ -24,16 +27,15 @@
 
 ### Health checks
 
-- [ ] After a normal sync, confirm no `! Camera clock is Xs ...` line appears.
-      If it fires immediately, the `/cmd/info/4` tz key is being misread — run
+- [ ] After a normal sync, confirm no `! Camera clock is Xs ...` line appears
+      (the IANA-tz misread that made an in-zone clock look ~10h off is now fixed;
+      this is a clean re-verify). If it ever fires immediately again, run
       `bd clock <name>` and compare the raw JSON offset to the laptop time.
 - [ ] With a camera on solar/ext power (reporting 0% battery), confirm no
       battery-low warning fires (`check_battery` suppresses 0%).
 - [ ] Run `bd sync <name> --log auto` and inspect the log file: warning lines
       should be plain `  ! ...` with no ANSI escape codes; on the terminal they
       should appear yellow (warn) or red (alert).
-- [ ] If a clock-drift warning fires, verify the 5-second auto-No: let the
-      prompt time out and confirm sync continues without setting the clock.
 - [ ] Confirm `bd stats` completes without error even if `/cmd/info/4` returns
       an unexpected shape — clock check should be silently skipped, not fatal.
 
