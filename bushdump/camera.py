@@ -448,12 +448,18 @@ class CameraClient:
             raise RuntimeError(f"Unexpected response from /cmd/getSetting: {body!r}")
         return body["data"]
 
-    def time_info(self) -> dict:
-        """Return the raw /cmd/info/4 response (clock + timezone).
+    def time_info(self) -> dict | None:
+        """Return the raw /cmd/info/4 response (clock + timezone), or None.
 
-        Response shape varies by firmware — returned as-is for the caller to inspect.
+        Response shape varies by firmware — returned as-is for the caller to
+        inspect. Flaky cameras occasionally return an empty or non-JSON body;
+        we return None rather than raising so clock checks degrade gracefully
+        (parse_info4 already treats None as "unknown").
         """
-        return self._client.get("/cmd/info/4").json()
+        try:
+            return self._client.get("/cmd/info/4").json()
+        except ValueError:
+            return None
 
     def parsed_time_info(self) -> TimeInfo | None:
         """Return parsed /cmd/info/4 clock as a TimeInfo, or None on unrecognised shape."""

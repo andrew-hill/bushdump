@@ -27,10 +27,6 @@
 
 ### Health checks
 
-- [ ] After a normal sync, confirm no `! Camera clock is Xs ...` line appears
-      (the IANA-tz misread that made an in-zone clock look ~10h off is now fixed;
-      this is a clean re-verify). If it ever fires immediately again, run
-      `bd clock <name>` and compare the raw JSON offset to the laptop time.
 - [ ] With a camera on solar/ext power (reporting 0% battery), confirm no
       battery-low warning fires (`check_battery` suppresses 0%).
 - [ ] Run `bd sync <name> --log auto` and inspect the log file: warning lines

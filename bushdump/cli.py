@@ -303,8 +303,9 @@ def cmd_clock(args: argparse.Namespace) -> int:
         now_local = datetime.datetime.now()
         print(f"Laptop UTC:   {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Laptop local: {now_local.strftime('%Y-%m-%d %H:%M:%S')}")
+        ti = client.time_info()
         print("Camera /cmd/info/4:")
-        print(json.dumps(client.time_info(), indent=2))
+        print(json.dumps(ti, indent=2) if ti is not None else "  (no JSON response)")
 
         if not args.sync:
             return 0
@@ -322,8 +323,9 @@ def cmd_clock(args: argparse.Namespace) -> int:
             return 0
 
         client.set_clock(sync_time)
+        ti = client.time_info()
         print("\nCamera /cmd/info/4 after sync:")
-        print(json.dumps(client.time_info(), indent=2))
+        print(json.dumps(ti, indent=2) if ti is not None else "  (no JSON response)")
     return 0
 
 
