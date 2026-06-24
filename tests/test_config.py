@@ -105,3 +105,48 @@ def test_state_round_trip_nested(tmp_path):
 
 def test_load_state_missing_returns_empty(tmp_path):
     assert config.load_state(tmp_path / "nope.json") == {}
+
+
+def test_backups_round_trip(tmp_path):
+    path = tmp_path / "backups.json"
+    backups = {
+        "east": {"Photo": "2026-05-31 18:00:01", "Video": "2026-05-30 12:00:00"},
+        "west": {"Photo": "2026-04-01 08:30:00"},
+    }
+    config.save_backups(backups, path)
+    assert config.load_backups(path) == backups
+
+
+def test_load_backups_missing_returns_empty(tmp_path):
+    assert config.load_backups(tmp_path / "nope.json") == {}
+
+
+def test_rsync_target_inherits_default(tmp_path):
+    cfg_path = _write(
+        tmp_path / "config.toml",
+        'rsync_target = "nas:/backup"\n\n[cameras.east]\nssid = "CAM8Z8_ABC"\n',
+    )
+    cam = config.load_config(cfg_path).cameras["east"]
+    assert cam.rsync_target == "nas:/backup"
+
+
+def test_rsync_target_per_camera_override(tmp_path):
+    cfg_path = _write(
+        tmp_path / "config.toml",
+        'rsync_target = "nas:/backup"\n'
+        "\n"
+        "[cameras.east]\n"
+        'ssid = "CAM8Z8_ABC"\n'
+        'rsync_target = "nas:/other"\n',
+    )
+    cam = config.load_config(cfg_path).cameras["east"]
+    assert cam.rsync_target == "nas:/other"
+
+
+def test_rsync_target_absent_is_none(tmp_path):
+    cfg_path = _write(
+        tmp_path / "config.toml",
+        '[cameras.east]\nssid = "CAM8Z8_ABC"\n',
+    )
+    cam = config.load_config(cfg_path).cameras["east"]
+    assert cam.rsync_target is None

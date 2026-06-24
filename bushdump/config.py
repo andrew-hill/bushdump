@@ -19,6 +19,7 @@ from bushdump.camera import DEFAULT_HOST
 CONFIG_DIR = Path.home() / ".config" / "bushdump"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 STATE_PATH = CONFIG_DIR / "state.json"
+BACKUPS_PATH = CONFIG_DIR / "backups.json"
 
 DEFAULT_OUTPUT_DIR = "~/Pictures/BushDump"
 DEFAULT_PASSWORD = "1234567890"
@@ -48,6 +49,7 @@ class Camera:
     output_dir: Path
     ble_address: str | None = None
     expect_ext_power: bool = False
+    rsync_target: str | None = None
 
 
 @dataclass(slots=True)
@@ -64,6 +66,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     base_dir = Path(data.get("output_dir", DEFAULT_OUTPUT_DIR)).expanduser()
     default_password = data.get("password", DEFAULT_PASSWORD)
     default_host = data.get("camera_host", DEFAULT_HOST)
+    default_rsync_target = data.get("rsync_target") or None
 
     cameras: dict[str, Camera] = {}
     for name, section in data.get("cameras", {}).items():
@@ -77,6 +80,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
             output_dir=output_dir,
             ble_address=section.get("ble_address") or None,
             expect_ext_power=bool(section.get("expect_ext_power", False)),
+            rsync_target=section.get("rsync_target") or default_rsync_target,
         )
     return Config(cameras=cameras)
 
@@ -127,6 +131,19 @@ def load_state(path: Path = STATE_PATH) -> dict[str, dict[str, str]]:
 def save_state(state: dict[str, dict[str, str]], path: Path = STATE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def load_backups(path: Path = BACKUPS_PATH) -> dict[str, dict[str, str]]:
+    """Return {camera_name: {media_type: watermark_date}}. Empty on first run."""
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text())
+    return {str(cam): {str(k): str(v) for k, v in d.items()} for cam, d in raw.items()}
+
+
+def save_backups(backups: dict[str, dict[str, str]], path: Path = BACKUPS_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(backups, indent=2, sort_keys=True))
 
 
 # --- TOML writing (minimal; we only emit one camera section at a time) ------

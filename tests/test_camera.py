@@ -1,4 +1,14 @@
-from bushdump.camera import CameraFile, parse_file_page, parse_info2, parse_info3
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from bushdump.camera import (
+    CameraClient,
+    CameraFile,
+    parse_file_page,
+    parse_info2,
+    parse_info3,
+)
 
 
 def test_camerafile_from_json_parses_fields():
@@ -77,3 +87,51 @@ def test_parse_info3_nominal():
 def test_parse_info3_missing_fields():
     assert parse_info3({"code": 0, "data": {}}) == (0, 0, 0, 0)
     assert parse_info3(None) == (0, 0, 0, 0)
+
+
+# --- CameraClient.delete ---
+
+
+def _make_http_client(response_body: object) -> MagicMock:
+    resp = MagicMock()
+    resp.json.return_value = response_body
+    resp.raise_for_status = MagicMock()
+    mock_http = MagicMock()
+    mock_http.get.return_value = resp
+    return mock_http
+
+
+def test_delete_calls_correct_url():
+    f = CameraFile(id=42, date="2026-04-15 10:00:00", size=1000, type=1)
+    mock_http = _make_http_client({"code": 0})
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        client.delete(f)
+    mock_http.get.assert_called_once_with("/cmd/delete/42/JPG")
+
+
+def test_delete_mp4_uses_correct_kind():
+    f = CameraFile(id=7, date="2026-04-15 10:00:00", size=500, type=2)
+    mock_http = _make_http_client({"code": 0})
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        client.delete(f)
+    mock_http.get.assert_called_once_with("/cmd/delete/7/MP4")
+
+
+def test_delete_raises_on_non_zero_code():
+    f = CameraFile(id=1, date="2026-04-15 10:00:00", size=1000, type=1)
+    mock_http = _make_http_client({"code": 1, "msg": "error"})
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        with pytest.raises(RuntimeError, match="Delete failed"):
+            client.delete(f)
+
+
+def test_delete_raises_on_bad_shape():
+    f = CameraFile(id=1, date="2026-04-15 10:00:00", size=1000, type=1)
+    mock_http = _make_http_client("unexpected string")
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        with pytest.raises(RuntimeError, match="Delete failed"):
+            client.delete(f)

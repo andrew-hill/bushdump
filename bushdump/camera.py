@@ -470,6 +470,19 @@ class CameraClient:
         payload = when.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
         self._client.post("/cmd/setGmtClock", json={"data": payload})
 
+    def delete(self, file: CameraFile) -> None:
+        """Permanently delete one file: GET /cmd/delete/<id>/<JPG|MP4>.
+
+        Expects {"code": 0, ...}; raises RuntimeError on bad shape, non-zero code,
+        or HTTP error. No retry — a half-done delete must surface, not silently repeat.
+        Callers must have confirmed downloaded + valid + backed-up first.
+        """
+        resp = self._client.get(f"/cmd/delete/{file.id}/{file.kind}")
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict) or body.get("code") != 0:
+            raise RuntimeError(f"Delete failed for {file.name}: {body!r}")
+
     def power_off(self) -> None:
         """Turn the camera's WiFi off (saves its battery).
 

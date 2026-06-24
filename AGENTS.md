@@ -52,8 +52,10 @@ uv run ruff format .                       # format
 - `bushdump/wifi.py` — macOS WiFi: list networks via CoreWLAN (`scan_ssids`/`watch_ssids`, Location-gated), join an AP via `networksetup` (no auto-restore)
 - `bushdump/camera.py` — HTTP client for the Linkiing platform (`/cmd/info/N`, `/list/detail/forward/`, `/file/`); `httpx` imported lazily so pure helpers stay testable without it
 - `bushdump/sync.py` — pure logic: `files_to_download`/`next_watermark` (watermark) and `cameras_present` (match scanned addresses to config)
-- `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state
-- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `stats`, `ls`, `keepalive`, `register`, `sync`); orchestrates the flows
+- `bushdump/backup.py` — pure backup watermark logic: `date_from_name`, `parse_rsync_pending`, `media_names_of_kind`, `safe_watermark`, `advance_watermark`
+- `bushdump/prune.py` — prune candidate logic: `classify_for_prune`, `scan_local_dir`, `parse_cutoff`; dataclasses `LocalFile`, `PruneVerdict`
+- `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state (`state.json`) + backup watermarks (`backups.json`)
+- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `stats`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`); orchestrates the flows
 - `tests/` — pytest; pure logic only, no real camera/BLE/WiFi needed
 - `docs/camera-api.md` — the reverse-engineered camera API reference
 - `docs/camera-models.md` — registry of which models have been confirmed against `camera-api.md`
@@ -111,9 +113,10 @@ Location permission; falls back to manual SSID entry otherwise.
 
 ## ⚠️ Safety rules for agents
 
-- **NEVER call the camera's `Delete` endpoint** unless the user explicitly
-  asks for that feature in that session. Downloads must never delete originals
-  by default.
+- **`CameraClient.delete()` is exposed only via `bushdump prune`** (dry-run
+  default, typed `DELETE <count>` token, requires backup watermark + local size
+  match + no `.error.txt` sidecar). Never call `CameraClient.delete()` from
+  any other path, and never add a shortcut that bypasses these guards.
 - **Download is a copy, not a move** — the camera's SD card keeps the files.
 - **The camera HTTP API is unencrypted and LAN-only** (its own AP). That's
   expected; don't add TLS/auth theatre. But never expose it beyond the AP.

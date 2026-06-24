@@ -8,12 +8,23 @@
       validation because libjpeg's error concealment fills in corrupted MCUs with
       plausible-looking repeated rows. Would need to detect large runs of identical
       MCU rows or similar heuristic to catch partial-download / bit-flip corruption.
-- [ ] Add deletion of old files on the SD card. I want to guard this strongly against
-      data loss, e.g. getting the user to specify a date to which they have backed up
-      files (only older ones are deleted). And for confirmation at time of deletion,
-      also check the sizes/dates/IDs match (best verification we can without re-download).
 
 ## Next-visit camera smoke tests
+
+### `bd backup` / `bd prune`
+
+- [ ] Set `rsync_target` in config; run `bd backup <name>` — confirm files
+      copy to target and `backups.json` advances the watermark.
+- [ ] Drop a `.error.txt` sidecar next to a recent local file before running
+      `bd backup <name>` — confirm the watermark caps below it.
+- [ ] Run `bd backup <name> --verify-only` after the watermark is already set;
+      then remove a file from the rsync target and re-run — confirm the watermark
+      stays put (advance-only) and prints a regression warning.
+- [ ] Run `bd prune <name> --before <date>` without `--confirm` — confirm a
+      correct DELETE/SKIP table is printed and the camera file count is unchanged.
+- [ ] With one known-backed-up old file: `bd prune <name> --before <date> --confirm`,
+      type the token — confirm that file disappears from `bd ls`, the local copy
+      and `state.json` are untouched.
 
 ### `bd sync --retry`
 

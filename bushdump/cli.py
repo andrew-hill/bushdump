@@ -839,6 +839,208 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+@_handle_expected_camera_errors
+def cmd_backup(args: argparse.Namespace) -> int:
+    """Rsync local output → NAS, verify, advance backup watermark."""
+    import shutil
+    import subprocess
+
+    from bushdump.backup import (
+        advance_watermark,
+        media_names_of_kind,
+        parse_rsync_pending,
+        safe_watermark,
+    )
+    from bushdump.prune import scan_local_dir
+
+    cam = _resolve_camera(args.name)
+    if cam is None:
+        return 1
+
+    target = (getattr(args, "to", None) or "").strip() or cam.rsync_target
+    if not target:
+        print(
+            "Error: no rsync target configured. Set rsync_target in config or pass --to.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if shutil.which("rsync") is None:
+        print("Error: rsync not found on PATH.", file=sys.stderr)
+        return 1
+
+    src = str(cam.output_dir).rstrip("/") + "/"
+    dst = target.rstrip("/") + "/"
+
+    if not args.verify_only:
+        print(f"Transferring {cam.name} → {dst} ...")
+        result = subprocess.run(["rsync", "-a", "--partial", src, dst])
+        if result.returncode != 0:
+            print(
+                f"rsync transfer exited {result.returncode} — continuing to verify ...",
+                file=sys.stderr,
+            )
+
+    verify_cmd = ["rsync", "-an", "--out-format=%n"]
+    if args.checksum:
+        verify_cmd.append("-c")
+    verify_cmd += [src, dst]
+    method = "byte-checked (rsync -c)" if args.checksum else "size+mtime verified"
+    print(f"Verifying ({method}) ...")
+    result = subprocess.run(verify_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"rsync verify failed (exit {result.returncode}):", file=sys.stderr)
+        if result.stderr.strip():
+            print(result.stderr.strip(), file=sys.stderr)
+        print("Backup watermark NOT advanced.", file=sys.stderr)
+        return 1
+
+    pending_names = parse_rsync_pending(result.stdout)
+    local_files = scan_local_dir(cam.output_dir)
+    local_names_all = set(local_files.keys())
+
+    backups = config.load_backups()
+    cam_backups = backups.setdefault(args.name, {})
+
+    _KIND = {"Photo": "JPG", "Video": "MP4"}
+
+    for media in args.media:
+        kind = _KIND[media]
+        local_names = media_names_of_kind(local_names_all, kind)
+        pending_canon = media_names_of_kind(pending_names, kind)
+        sidecar_blocked = media_names_of_kind(
+            {n for n, lf in local_files.items() if lf.has_error_sidecar}, kind
+        )
+        blocked = pending_canon | sidecar_blocked
+        computed = safe_watermark(local_names, blocked)
+        stored = cam_backups.get(media)
+        new_wm, regressed = advance_watermark(computed, stored)
+        if regressed:
+            print(
+                f"  WARNING: {media} computed watermark ({computed}) is before "
+                f"stored ({stored}) — keeping stored.",
+                file=sys.stderr,
+            )
+        if new_wm is not None:
+            cam_backups[media] = new_wm
+        still_pending = len(pending_canon)
+        wm_display = new_wm or "(none)"
+        print(f"  {media}: watermark → {wm_display}, {still_pending} file(s) still pending")
+
+    config.save_backups(backups)
+    return 0
+
+
+@_handle_expected_camera_errors
+def cmd_prune(args: argparse.Namespace) -> int:
+    """List or delete old backed-up files from the camera SD card."""
+    from bushdump.camera import CameraClient
+    from bushdump.prune import PruneVerdict, classify_for_prune, parse_cutoff, scan_local_dir
+
+    cam = _resolve_camera(args.name)
+    if cam is None:
+        return 1
+
+    try:
+        cutoff = parse_cutoff(args.before)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    _wake_join(cam)
+
+    with CameraClient(cam.camera_host) as client:
+        print("Waiting for camera to respond...")
+        if not client.wait_until_ready():
+            print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
+            return 1
+        print("Camera ready.")
+        print("Listing files...")
+        all_files = client.list_all_files()
+
+        local = scan_local_dir(cam.output_dir)
+        cam_backups = config.load_backups().get(args.name, {})
+
+        all_verdicts: list[PruneVerdict] = []
+        total_deletable = 0
+        total_skipped = 0
+        total_bytes = 0
+
+        for media in args.media:
+            type_code = _MEDIA_TYPE_CODE[media]
+            files = [f for f in all_files if f.type == type_code]
+            backup_watermark = cam_backups.get(media)
+            verdicts = classify_for_prune(
+                files,
+                local=local,
+                backup_watermark=backup_watermark,
+                cutoff_date=cutoff,
+            )
+            all_verdicts.extend(verdicts)
+            for v in verdicts:
+                if v.file.date >= cutoff:
+                    continue
+                size_kb = v.file.size // 1024
+                if v.deletable:
+                    print(f"  DELETE  {v.file.name}  {v.file.date}  {size_kb:>8} KB")
+                    total_deletable += 1
+                    total_bytes += v.file.size
+                else:
+                    print(f"  SKIP: {v.reason:<40}  {v.file.name}")
+                    total_skipped += 1
+
+        size_mb = total_bytes / 1_000_000
+        print(f"\n{total_deletable} deletable, {total_skipped} skipped, {size_mb:.1f} MB")
+
+        if not args.confirm:
+            print("Dry-run — nothing deleted. Pass --confirm to delete.")
+            if not args.keep_awake:
+                client.power_off()
+            return 0
+
+        if not sys.stdin.isatty():
+            print("Error: --confirm requires an interactive terminal.", file=sys.stderr)
+            return 1
+
+        if total_deletable == 0:
+            print("Nothing to delete.")
+            if not args.keep_awake:
+                client.power_off()
+            return 0
+
+        token = f"DELETE {total_deletable}"
+        print(
+            f"\nPermanently delete {total_deletable} files ({size_mb:.1f} MB) from "
+            f"{args.name}'s SD card — cannot be undone."
+        )
+        try:
+            answer = input(f"Type  {token}  to proceed: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return 0
+        if answer.strip() != token:
+            print("Token mismatch — cancelled.")
+            return 0
+
+        deleted = 0
+        for v in all_verdicts:
+            if not v.deletable:
+                continue
+            try:
+                client.delete(v.file)
+                print(f"deleted {v.file.name}")
+                deleted += 1
+            except Exception as e:
+                print(f"Error deleting {v.file.name}: {e}", file=sys.stderr)
+                print(f"Stopped after {deleted}/{total_deletable} deletions.", file=sys.stderr)
+                break
+
+        if not args.keep_awake:
+            client.power_off()
+
+    return 0
+
+
 def cmd_completions(args: argparse.Namespace) -> int:
     print(argcomplete.shellcode([args._prog], shell=args.shell), end="")
     return 0
@@ -865,6 +1067,10 @@ def build_parser() -> argparse.ArgumentParser:
     settings          show current camera settings (read-only)
     clock             show raw camera clock response; optionally sync to UTC
     keepalive, ka     keep the camera's WiFi alive (Ctrl+C to stop)
+
+  Maintenance (SD card):
+    backup            rsync local output to NAS; advance backup watermark
+    prune             delete old backed-up files from the camera SD card
 """,
         usage="%(prog)s [--version] <command> ...",
         add_help=False,
@@ -990,6 +1196,69 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-download files that previously failed validation (.error.txt sidecars)",
     )
     p_sync.set_defaults(func=cmd_sync)
+
+    p_backup = sub.add_parser(
+        "backup",
+        help="rsync local output to NAS; advance backup watermark",
+    )
+    p_backup.add_argument("name", help="camera name (from `bd cameras`)")
+    p_backup.add_argument(
+        "--to",
+        dest="to",
+        default="",
+        metavar="TARGET",
+        help="rsync target (overrides config rsync_target)",
+    )
+    p_backup.add_argument(
+        "--checksum",
+        action="store_true",
+        help="use rsync -c for byte-level verify (slower)",
+    )
+    p_backup.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="skip transfer; re-verify and advance watermark",
+    )
+    p_backup.add_argument(
+        "--media",
+        nargs="*",
+        choices=MEDIA_TYPES,
+        default=list(MEDIA_TYPES),
+        metavar="TYPE",
+        help="media types to process (Photo, Video; default: both)",
+    )
+    p_backup.set_defaults(func=cmd_backup)
+
+    p_prune = sub.add_parser(
+        "prune",
+        help="delete old backed-up files from the camera SD card (dry-run by default)",
+    )
+    p_prune.add_argument("name", help="camera name (from `bd cameras`)")
+    p_prune.add_argument(
+        "--before",
+        required=True,
+        metavar="DATE",
+        help="delete files with date before this (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)",
+    )
+    p_prune.add_argument(
+        "--media",
+        nargs="*",
+        choices=MEDIA_TYPES,
+        default=list(MEDIA_TYPES),
+        metavar="TYPE",
+        help="media types to process (Photo, Video; default: both)",
+    )
+    p_prune.add_argument(
+        "--confirm",
+        action="store_true",
+        help="actually delete (requires typed DELETE <count> token)",
+    )
+    p_prune.add_argument(
+        "--keep-awake",
+        action="store_true",
+        help="don't power the camera's WiFi off when done",
+    )
+    p_prune.set_defaults(func=cmd_prune)
 
     p_completions = sub.add_parser("completions", help="print shell completion script")
     p_completions.add_argument("shell", choices=["zsh", "bash", "fish"])
