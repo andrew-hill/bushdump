@@ -851,45 +851,64 @@ def cmd_backup(args: argparse.Namespace) -> int:
         media_names_of_kind,
         parse_rsync_extra,
         parse_rsync_pending,
+        parse_rsync_transfer_count,
         rsync_has_summary,
         safe_watermark,
         validate_watermark,
     )
     from bushdump.prune import scan_local_dir
 
-    cam = _resolve_camera(args.name)
+    cfg = config.load_config()
+    cam = cfg.cameras.get(args.name)
     if cam is None:
-        return 1
-
-    target = (getattr(args, "to", None) or "").strip() or cam.rsync_target
-    if not target:
         print(
-            "Error: no rsync target configured. Set rsync_target in config or pass --to.",
+            f"Unknown camera {args.name!r}. Configured: {', '.join(cfg.cameras) or '(none)'}",
             file=sys.stderr,
         )
         return 1
 
-    if shutil.which("rsync") is None:
-        print("Error: rsync not found on PATH.", file=sys.stderr)
+    base = (getattr(args, "to", None) or "").strip() or cfg.backup.target or ""
+    if not base:
+        print(
+            "Error: no rsync target configured. Add a [backup] section to config or pass --to.",
+            file=sys.stderr,
+        )
+        return 1
+
+    rsync_bin = cfg.backup.rsync_bin
+    if shutil.which(rsync_bin) is None:
+        print(f"Error: rsync binary {rsync_bin!r} not found on PATH.", file=sys.stderr)
         return 1
 
     src = str(cam.output_dir).rstrip("/") + "/"
-    dst = target.rstrip("/") + "/"
+    dst = base.rstrip("/") + "/" + cam.name + "/"
 
     if not args.verify_only and not args.dry_run:
         print(f"Transferring {cam.name} → {dst} ...")
-        transfer_cmd = ["rsync", "-a", "--partial"]
+        transfer_cmd = [rsync_bin, "-rlt", "--partial", "--stats"] + cfg.backup.args
         if args.verbose:
             transfer_cmd.append("-v")
         transfer_cmd += [src, dst]
-        result = subprocess.run(transfer_cmd)
-        if result.returncode != 0:
+        proc = subprocess.Popen(transfer_cmd, stdout=subprocess.PIPE, text=True)
+        stats_lines: list[str] = []
+        assert proc.stdout
+        for line in proc.stdout:
+            if args.verbose:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            stats_lines.append(line)
+        proc.wait()
+        stats_text = "".join(stats_lines)
+        transferred = parse_rsync_transfer_count(stats_text)
+        if transferred is not None:
+            print(f"  {transferred} file(s) transferred.")
+        if proc.returncode != 0:
             print(
-                f"rsync transfer exited {result.returncode} — continuing to verify ...",
+                f"rsync transfer exited {proc.returncode} — continuing to verify ...",
                 file=sys.stderr,
             )
 
-    verify_cmd = ["rsync", "-anv", "--delete", "--itemize-changes"]
+    verify_cmd = [rsync_bin, "-rltnv", "--delete", "--itemize-changes"]
     if args.checksum:
         verify_cmd.append("-c")
     verify_cmd += [src, dst]
@@ -1333,8 +1352,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--to",
         dest="to",
         default="",
-        metavar="TARGET",
-        help="rsync target (overrides config rsync_target)",
+        metavar="BASE",
+        help="rsync base target (overrides config [backup] target); camera name is appended automatically",
     )
     p_backup.add_argument(
         "--checksum",

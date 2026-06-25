@@ -113,6 +113,21 @@ def rsync_has_summary(output: str) -> bool:
     return False
 
 
+def parse_rsync_transfer_count(stats_output: str) -> int | None:
+    """Extract the file count from rsync --stats output.
+
+    Returns None if the stats block is absent (e.g. transfer was skipped or failed
+    before printing stats).
+    """
+    for line in stats_output.splitlines():
+        if line.startswith("Number of regular files transferred:"):
+            try:
+                return int(line.split(":")[-1].strip().replace(",", ""))
+            except ValueError:
+                return None
+    return None
+
+
 def validate_watermark(value: str) -> bool:
     """True if value is a valid zero-padded watermark string (YYYY-MM-DD HH:MM:SS)."""
     return bool(_WATERMARK_RE.fullmatch(value))

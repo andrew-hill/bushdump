@@ -121,32 +121,25 @@ def test_load_backups_missing_returns_empty(tmp_path):
     assert config.load_backups(tmp_path / "nope.json") == {}
 
 
-def test_rsync_target_inherits_default(tmp_path):
+def test_backup_section_target_and_args(tmp_path):
     cfg_path = _write(
         tmp_path / "config.toml",
-        'rsync_target = "nas:/backup"\n\n[cameras.east]\nssid = "CAM8Z8_ABC"\n',
-    )
-    cam = config.load_config(cfg_path).cameras["east"]
-    assert cam.rsync_target == "nas:/backup"
-
-
-def test_rsync_target_per_camera_override(tmp_path):
-    cfg_path = _write(
-        tmp_path / "config.toml",
-        'rsync_target = "nas:/backup"\n'
+        '[cameras.east]\nssid = "CAM8Z8_ABC"\n'
         "\n"
-        "[cameras.east]\n"
-        'ssid = "CAM8Z8_ABC"\n'
-        'rsync_target = "nas:/other"\n',
+        '[backup]\ntarget = "nas:/backup/"\nargs = ["--chown=andrew:users"]\nrsync_bin = "/opt/homebrew/bin/rsync"\n',
     )
-    cam = config.load_config(cfg_path).cameras["east"]
-    assert cam.rsync_target == "nas:/other"
+    cfg = config.load_config(cfg_path)
+    assert cfg.backup.target == "nas:/backup/"
+    assert cfg.backup.args == ["--chown=andrew:users"]
+    assert cfg.backup.rsync_bin == "/opt/homebrew/bin/rsync"
 
 
-def test_rsync_target_absent_is_none(tmp_path):
+def test_backup_section_absent_gives_defaults(tmp_path):
     cfg_path = _write(
         tmp_path / "config.toml",
         '[cameras.east]\nssid = "CAM8Z8_ABC"\n',
     )
-    cam = config.load_config(cfg_path).cameras["east"]
-    assert cam.rsync_target is None
+    cfg = config.load_config(cfg_path)
+    assert cfg.backup.target is None
+    assert cfg.backup.args == []
+    assert cfg.backup.rsync_bin == "rsync"

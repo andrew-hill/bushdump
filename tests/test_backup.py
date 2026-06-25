@@ -4,6 +4,7 @@ from bushdump.backup import (
     media_names_of_kind,
     parse_rsync_extra,
     parse_rsync_pending,
+    parse_rsync_transfer_count,
     rsync_has_summary,
     safe_watermark,
 )
@@ -166,6 +167,39 @@ def test_rsync_has_summary_absent():
 
 def test_rsync_has_summary_partial_output():
     assert rsync_has_summary("sending incremental file list\n") is False
+
+
+# --- parse_rsync_transfer_count ---
+
+
+def test_parse_rsync_transfer_count_typical():
+    output = (
+        "Number of files: 1,234 (reg: 456, dir: 778)\n"
+        "Number of created files: 45 (reg: 45)\n"
+        "Number of deleted files: 0\n"
+        "Number of regular files transferred: 45\n"
+        "Total file size: 1.23G bytes\n"
+        "sent 456M bytes  received 1,234 bytes\n"
+    )
+    assert parse_rsync_transfer_count(output) == 45
+
+
+def test_parse_rsync_transfer_count_zero():
+    output = (
+        "Number of files: 10 (reg: 10)\n"
+        "Number of regular files transferred: 0\n"
+        "sent 1,234 bytes  received 12 bytes\n"
+    )
+    assert parse_rsync_transfer_count(output) == 0
+
+
+def test_parse_rsync_transfer_count_absent():
+    assert parse_rsync_transfer_count("rsync: connection failed\n") is None
+
+
+def test_parse_rsync_transfer_count_large_with_commas():
+    output = "Number of regular files transferred: 1,234\n"
+    assert parse_rsync_transfer_count(output) == 1234
 
 
 # --- media_names_of_kind ---

@@ -33,6 +33,14 @@ output_dir = "{DEFAULT_OUTPUT_DIR}"   # each camera saves to <output_dir>/<name>
 password = "{DEFAULT_PASSWORD}"
 camera_host = "{DEFAULT_HOST}"
 
+# Backup settings (used by `bushdump backup`).
+# [backup]
+# # Each camera's local dir is mirrored under target: <target>/<name>/
+# # e.g. ~/Pictures/BushDump/east/ → user@nas:…/backup/east/
+# target = "user@nas:/path/to/backup/"
+# args = ["--chown=user:group"]   # extra rsync flags (optional; not applied to verify)
+# rsync_bin = "/opt/homebrew/bin/rsync"  # override if system rsync is too old (e.g. for --chown)
+
 # Example (delete or edit):
 # [cameras.frontgate]
 # ble_address = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
@@ -49,12 +57,19 @@ class Camera:
     output_dir: Path
     ble_address: str | None = None
     expect_ext_power: bool = False
-    rsync_target: str | None = None
+
+
+@dataclass(slots=True)
+class BackupConfig:
+    target: str | None = None
+    args: list[str] = field(default_factory=list)
+    rsync_bin: str = "rsync"
 
 
 @dataclass(slots=True)
 class Config:
     cameras: dict[str, Camera] = field(default_factory=dict)
+    backup: BackupConfig = field(default_factory=BackupConfig)
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -66,7 +81,6 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     base_dir = Path(data.get("output_dir", DEFAULT_OUTPUT_DIR)).expanduser()
     default_password = data.get("password", DEFAULT_PASSWORD)
     default_host = data.get("camera_host", DEFAULT_HOST)
-    default_rsync_target = data.get("rsync_target") or None
 
     cameras: dict[str, Camera] = {}
     for name, section in data.get("cameras", {}).items():
@@ -80,9 +94,16 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
             output_dir=output_dir,
             ble_address=section.get("ble_address") or None,
             expect_ext_power=bool(section.get("expect_ext_power", False)),
-            rsync_target=section.get("rsync_target") or default_rsync_target,
         )
-    return Config(cameras=cameras)
+
+    backup_data = data.get("backup", {})
+    backup = BackupConfig(
+        target=backup_data.get("target") or None,
+        args=list(backup_data.get("args", [])),
+        rsync_bin=backup_data.get("rsync_bin", "rsync"),
+    )
+
+    return Config(cameras=cameras, backup=backup)
 
 
 def write_config_template(path: Path = CONFIG_PATH) -> bool:
