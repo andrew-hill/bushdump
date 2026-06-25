@@ -1311,10 +1311,14 @@ def cmd_prune(args: argparse.Namespace) -> int:
         local = scan_local_dir(cam.output_dir)
         cam_backups = config.load_backups().get(args.name, {})
 
+        print(_ansi("⚠  The following files will be permanently deleted from the SD card if you confirm below.", "1;33"))
+
         all_verdicts: list[PruneVerdict] = []
         total_deletable = 0
         total_skipped = 0
+        total_outside_range = 0
         total_bytes = 0
+        delete_dates: list[str] = []
 
         for media in args.media:
             type_code = _MEDIA_TYPE_CODE[media]
@@ -1329,26 +1333,27 @@ def cmd_prune(args: argparse.Namespace) -> int:
             all_verdicts.extend(verdicts)
             for v in verdicts:
                 if v.file.date >= cutoff:
+                    total_outside_range += 1
                     continue
                 size_kb = v.file.size // 1024
                 if v.deletable:
                     print(f"  DELETE  {v.file.name}  {v.file.date}  {size_kb:>8} KB")
                     total_deletable += 1
                     total_bytes += v.file.size
+                    delete_dates.append(v.file.date)
                 else:
                     print(f"  SKIP: {v.reason:<40}  {v.file.name}")
                     total_skipped += 1
 
         size_mb = total_bytes / 1_000_000
-        print(f"\n{total_deletable} deletable, {total_skipped} skipped, {size_mb:.1f} MB")
-
-        if not args.confirm:
-            print("Dry-run — nothing deleted. Pass --confirm to delete.")
-            return 0
+        date_range_str = f"{min(delete_dates)[:10]} → {max(delete_dates)[:10]}" if delete_dates else "—"
+        print(f"\n  delete range:  {date_range_str}")
+        print(f"  in range:      {total_deletable} to delete, {total_skipped} skipped, {size_mb:.1f} MB")
+        print(f"  outside range: {total_outside_range} not considered (newer than {cutoff[:10]})")
 
         if not sys.stdin.isatty():
-            print("Error: --confirm requires an interactive terminal.", file=sys.stderr)
-            return 1
+            print("Non-interactive — showing plan only. Run in a terminal to confirm and delete.")
+            return 0
 
         if total_deletable == 0:
             print("Nothing to delete.")
@@ -1591,7 +1596,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_prune = sub.add_parser(
         "prune",
-        help="delete old backed-up files from the camera SD card (dry-run by default)",
+        help="delete old backed-up files from the camera SD card (shows plan, then prompts)",
     )
     p_prune.add_argument("name", help="camera name (from `bd cameras`)")
     p_prune.add_argument(
@@ -1607,11 +1612,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=list(MEDIA_TYPES),
         metavar="TYPE",
         help="media types to process (Photo, Video; default: both)",
-    )
-    p_prune.add_argument(
-        "--confirm",
-        action="store_true",
-        help="actually delete (requires typed DELETE <count> token)",
     )
     p_prune.set_defaults(func=cmd_prune)
 
