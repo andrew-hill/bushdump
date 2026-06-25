@@ -994,8 +994,6 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
         if not args.confirm:
             print("Dry-run — nothing deleted. Pass --confirm to delete.")
-            if not args.keep_awake:
-                client.power_off()
             return 0
 
         if not sys.stdin.isatty():
@@ -1004,8 +1002,6 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
         if total_deletable == 0:
             print("Nothing to delete.")
-            if not args.keep_awake:
-                client.power_off()
             return 0
 
         token = f"DELETE {total_deletable}"
@@ -1023,6 +1019,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
             return 0
 
         deleted = 0
+        delete_failed = False
         for v in all_verdicts:
             if not v.deletable:
                 continue
@@ -1033,10 +1030,11 @@ def cmd_prune(args: argparse.Namespace) -> int:
             except Exception as e:
                 print(f"Error deleting {v.file.name}: {e}", file=sys.stderr)
                 print(f"Stopped after {deleted}/{total_deletable} deletions.", file=sys.stderr)
+                delete_failed = True
                 break
 
-        if not args.keep_awake:
-            client.power_off()
+        if delete_failed:
+            return 1
 
     return 0
 
@@ -1252,11 +1250,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm",
         action="store_true",
         help="actually delete (requires typed DELETE <count> token)",
-    )
-    p_prune.add_argument(
-        "--keep-awake",
-        action="store_true",
-        help="don't power the camera's WiFi off when done",
     )
     p_prune.set_defaults(func=cmd_prune)
 

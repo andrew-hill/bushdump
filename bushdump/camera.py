@@ -479,7 +479,12 @@ class CameraClient:
         """
         resp = self._client.get(f"/cmd/delete/{file.id}/{file.kind}")
         resp.raise_for_status()
-        body = resp.json()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Delete failed for {file.name}: non-JSON response: {resp.text[:200]!r}"
+            ) from exc
         if not isinstance(body, dict) or body.get("code") != 0:
             raise RuntimeError(f"Delete failed for {file.name}: {body!r}")
 
