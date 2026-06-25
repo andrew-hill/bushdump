@@ -847,9 +847,12 @@ def cmd_backup(args: argparse.Namespace) -> int:
 
     from bushdump.backup import (
         advance_watermark,
+        date_from_name,
         media_names_of_kind,
+        parse_rsync_extra,
         parse_rsync_pending,
         safe_watermark,
+        validate_watermark,
     )
     from bushdump.prune import scan_local_dir
 
@@ -874,14 +877,14 @@ def cmd_backup(args: argparse.Namespace) -> int:
 
     if not args.verify_only:
         print(f"Transferring {cam.name} → {dst} ...")
-        result = subprocess.run(["rsync", "-a", "--partial", src, dst])
+        result = subprocess.run(["rsync", "-a", "--no-delete", "--partial", src, dst])
         if result.returncode != 0:
             print(
                 f"rsync transfer exited {result.returncode} — continuing to verify ...",
                 file=sys.stderr,
             )
 
-    verify_cmd = ["rsync", "-an", "--out-format=%n"]
+    verify_cmd = ["rsync", "-an", "--delete", "--itemize-changes"]
     if args.checksum:
         verify_cmd.append("-c")
     verify_cmd += [src, dst]
@@ -895,7 +898,16 @@ def cmd_backup(args: argparse.Namespace) -> int:
         print("Backup watermark NOT advanced.", file=sys.stderr)
         return 1
 
+    if not result.stdout.strip():
+        print(
+            "Error: rsync produced no output — connection may have failed silently. "
+            "Backup watermark NOT advanced.",
+            file=sys.stderr,
+        )
+        return 1
+
     pending_names = parse_rsync_pending(result.stdout)
+    extra_names = parse_rsync_extra(result.stdout)
     local_files = scan_local_dir(cam.output_dir)
     local_names_all = set(local_files.keys())
 
@@ -903,6 +915,21 @@ def cmd_backup(args: argparse.Namespace) -> int:
     cam_backups = backups.setdefault(args.name, {})
 
     _KIND = {"Photo": "JPG", "Video": "MP4"}
+
+    for media, wm in cam_backups.items():
+        if not validate_watermark(wm):
+            print(
+                f"Error: backup watermark for {args.name}/{media} in "
+                f"{config.BACKUPS_PATH} is not a valid timestamp: {wm!r}\n"
+                f"Expected format: YYYY-MM-DD HH:MM:SS (zero-padded, e.g. "
+                f"2026-06-12 07:40:00)",
+                file=sys.stderr,
+            )
+            return 1
+
+    warnings: list[str] = []
+    wm_advanced: list[str] = []
+    pending_by_type: list[str] = []
 
     for media in args.media:
         kind = _KIND[media]
@@ -916,16 +943,88 @@ def cmd_backup(args: argparse.Namespace) -> int:
         stored = cam_backups.get(media)
         new_wm, regressed = advance_watermark(computed, stored)
         if regressed:
-            print(
-                f"  WARNING: {media} computed watermark ({computed}) is before "
-                f"stored ({stored}) — keeping stored.",
-                file=sys.stderr,
+            warnings.append(
+                f"{media}: computed watermark ({computed}) is before stored "
+                f"({stored}) — keeping stored"
             )
         if new_wm is not None:
             cam_backups[media] = new_wm
+
+        total_local = len(local_names)
+        on_server = total_local - len(pending_canon)
         still_pending = len(pending_canon)
-        wm_display = new_wm or "(none)"
-        print(f"  {media}: watermark → {wm_display}, {still_pending} file(s) still pending")
+
+        if new_wm != stored:
+            wm_tag = f"{stored or '(none)'} → {new_wm}  [advanced]"
+            wm_advanced.append(f"{media}: {stored or '(none)'} → {new_wm}")
+        elif stored is not None:
+            wm_tag = f"{new_wm}  [no change]"
+        else:
+            wm_tag = "(none)"
+
+        print(
+            f"  {media}: {total_local} local, {on_server} on server, "
+            f"{still_pending} pending  |  watermark {wm_tag}"
+        )
+
+        if still_pending:
+            pending_by_type.append(f"{still_pending} {media}")
+
+        behind_wm = {
+            n for n in pending_canon
+            if new_wm and (d := date_from_name(n)) and d <= new_wm
+        }
+        if behind_wm:
+            warnings.append(
+                f"{media}: {len(behind_wm)} pending file(s) are behind the watermark"
+                f" — expected on server already"
+            )
+        sidecar_behind_wm = {
+            n for n in sidecar_blocked
+            if new_wm and (d := date_from_name(n)) and d <= new_wm
+        }
+        if sidecar_behind_wm:
+            warnings.append(
+                f"{media}: {len(sidecar_behind_wm)} file(s) have .error.txt sidecars"
+                f" at or behind the watermark — watermark has advanced past a broken file"
+            )
+        server_extra = media_names_of_kind(extra_names, kind)
+        if server_extra:
+            warnings.append(
+                f"{media}: {len(server_extra)} file(s) on server not present locally"
+            )
+
+    all_canonical = (
+        media_names_of_kind(pending_names, "JPG") | media_names_of_kind(pending_names, "MP4")
+    )
+    noncanonical_pending = pending_names - all_canonical
+    if noncanonical_pending:
+        warnings.append(
+            f"{len(noncanonical_pending)} non-media file(s) differ from server"
+        )
+    all_canonical_extra = (
+        media_names_of_kind(extra_names, "JPG") | media_names_of_kind(extra_names, "MP4")
+    )
+    noncanonical_extra = extra_names - all_canonical_extra
+    if noncanonical_extra:
+        warnings.append(
+            f"{len(noncanonical_extra)} non-media file(s) on server not present locally"
+        )
+
+    if warnings:
+        print(f"\n  {len(warnings)} warning(s):")
+        for w in warnings:
+            print(f"    [!] {w}")
+
+    summary_parts = []
+    if wm_advanced:
+        summary_parts.append("watermark advanced: " + ", ".join(wm_advanced))
+    else:
+        summary_parts.append("watermark unchanged")
+    summary_parts.append(
+        ("pending: " + ", ".join(pending_by_type)) if pending_by_type else "nothing pending"
+    )
+    print("\n  Result: " + "  ·  ".join(summary_parts))
 
     config.save_backups(backups)
     return 0

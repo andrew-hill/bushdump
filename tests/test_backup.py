@@ -2,6 +2,7 @@ from bushdump.backup import (
     advance_watermark,
     date_from_name,
     media_names_of_kind,
+    parse_rsync_extra,
     parse_rsync_pending,
     safe_watermark,
 )
@@ -54,15 +55,39 @@ def test_date_from_name_rejects_garbage():
 
 
 def test_parse_rsync_pending_typical():
-    output = "20260510T130001_00000001.jpg\n20260510T130002_00000002.mp4\nsubdir/\n.DS_Store\n\n"
+    # macOS rsync uses 9-char itemize prefix; files going to server show as '<f'
+    output = (
+        "<f+++++++ 20260510T130001_00000001.jpg\n"
+        "<f+++++++ 20260510T130002_00000002.mp4\n"
+        "cd+++++++ subdir/\n"
+        "<f+++++++ .DS_Store\n"
+        "\n"
+    )
     result = parse_rsync_pending(output)
     assert "20260510T130001_00000001.jpg" in result
     assert "20260510T130002_00000002.mp4" in result
     assert ".DS_Store" in result
     assert "" not in result
-    # directories excluded
     for name in result:
         assert not name.endswith("/")
+
+
+def test_parse_rsync_pending_also_accepts_gt_prefix():
+    # Linux rsync may use '>' for files sent to remote
+    output = ">f+++++++++ 20260510T130001_00000001.jpg\n"
+    result = parse_rsync_pending(output)
+    assert "20260510T130001_00000001.jpg" in result
+
+
+def test_parse_rsync_pending_ignores_attribute_only():
+    # '.' prefix = file data already on server, only attributes differ — not pending
+    output = (
+        "<f+++++++ 20260510T130001_00000001.jpg\n"
+        ".f...p.g. 20260510T130002_00000002.jpg\n"
+    )
+    result = parse_rsync_pending(output)
+    assert "20260510T130001_00000001.jpg" in result
+    assert "20260510T130002_00000002.jpg" not in result
 
 
 def test_parse_rsync_pending_empty():
@@ -70,10 +95,47 @@ def test_parse_rsync_pending_empty():
 
 
 def test_parse_rsync_pending_strips_path_prefix():
-    output = "subdir/20260510T130001_00000001.jpg\n"
+    output = "<f+++++++ subdir/20260510T130001_00000001.jpg\n"
     result = parse_rsync_pending(output)
     assert "20260510T130001_00000001.jpg" in result
     assert "subdir/20260510T130001_00000001.jpg" not in result
+
+
+def test_parse_rsync_pending_ignores_deleting_lines():
+    output = (
+        "<f+++++++ 20260510T130001_00000001.jpg\n"
+        "*deleting   20260509T120000_00000001.jpg\n"
+    )
+    result = parse_rsync_pending(output)
+    assert "20260510T130001_00000001.jpg" in result
+    assert "20260509T120000_00000001.jpg" not in result
+
+
+# --- parse_rsync_extra ---
+
+
+def test_parse_rsync_extra_typical():
+    output = (
+        ">f+++++++++ 20260510T130001_00000001.jpg\n"
+        "*deleting   20260509T120000_00000001.jpg\n"
+        "*deleting   random.txt\n"
+    )
+    result = parse_rsync_extra(output)
+    assert "20260509T120000_00000001.jpg" in result
+    assert "random.txt" in result
+    assert "20260510T130001_00000001.jpg" not in result
+
+
+def test_parse_rsync_extra_empty():
+    assert parse_rsync_extra("") == set()
+
+
+def test_parse_rsync_extra_ignores_directories():
+    output = "*deleting   subdir/\n*deleting   20260509T120000_00000001.jpg\n"
+    result = parse_rsync_extra(output)
+    assert "20260509T120000_00000001.jpg" in result
+    assert "subdir/" not in result
+    assert "subdir" not in result
 
 
 # --- media_names_of_kind ---

@@ -8,6 +8,7 @@ from collections.abc import Iterable
 # Matches exactly: YYYYMMDDTHHmmss_<8+ digit id>.(jpg|mp4)
 # Rejects: .error.txt sidecars, .part/.part2 temps, .alt.* copies, _2/_3 collision renames.
 _MEDIA_NAME_RE = re.compile(r"\d{8}T\d{6}_\d{8,}\.(jpg|mp4)", re.IGNORECASE)
+_WATERMARK_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 
 
 def date_from_name(name: str) -> str | None:
@@ -20,13 +21,38 @@ def date_from_name(name: str) -> str | None:
 
 
 def parse_rsync_pending(dry_run_output: str) -> set[str]:
-    """Basenames rsync still wants to transfer, from `rsync -an --out-format='%n'`."""
+    """Basenames rsync still wants to transfer, from `rsync -an --itemize-changes`.
+
+    Itemize lines start with a Y-char: '.' = attribute-only (data already synced),
+    '*' = message (e.g. *deleting). All other Y-chars (<, >, c, h) indicate a file
+    that needs data transfer. The prefix length varies by rsync version (9 or 11
+    chars); we find the first space to locate the path.
+    """
     result: set[str] = set()
     for line in dry_run_output.splitlines():
         line = line.strip()
-        if not line or line.endswith("/"):
+        if not line or line[0] in (".", "*"):
             continue
-        result.add(line.rsplit("/", 1)[-1])
+        space_idx = line.find(" ")
+        if space_idx < 2:
+            continue
+        path = line[space_idx + 1:]
+        if path.endswith("/"):
+            continue
+        result.add(path.rsplit("/", 1)[-1])
+    return result
+
+
+def parse_rsync_extra(dry_run_output: str) -> set[str]:
+    """Basenames on destination but not in source, from `rsync -an --delete --itemize-changes`."""
+    result: set[str] = set()
+    for line in dry_run_output.splitlines():
+        line = line.strip()
+        if not line.startswith("*deleting"):
+            continue
+        path = line[len("*deleting"):].lstrip()
+        if path and not path.endswith("/"):
+            result.add(path.rsplit("/", 1)[-1])
     return result
 
 
@@ -72,6 +98,11 @@ def safe_watermark(local_names: Iterable[str], blocked: set[str]) -> str | None:
     earliest_blocked = min(blocked_dates)
     confirmed = [d for d in dated if d < earliest_blocked]
     return max(confirmed) if confirmed else None
+
+
+def validate_watermark(value: str) -> bool:
+    """True if value is a valid zero-padded watermark string (YYYY-MM-DD HH:MM:SS)."""
+    return bool(_WATERMARK_RE.fullmatch(value))
 
 
 def advance_watermark(computed: str | None, stored: str | None) -> tuple[str | None, bool]:
