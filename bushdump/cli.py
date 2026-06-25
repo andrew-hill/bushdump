@@ -851,6 +851,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
         media_names_of_kind,
         parse_rsync_extra,
         parse_rsync_pending,
+        rsync_has_summary,
         safe_watermark,
         validate_watermark,
     )
@@ -875,22 +876,28 @@ def cmd_backup(args: argparse.Namespace) -> int:
     src = str(cam.output_dir).rstrip("/") + "/"
     dst = target.rstrip("/") + "/"
 
-    if not args.verify_only:
+    if not args.verify_only and not args.dry_run:
         print(f"Transferring {cam.name} → {dst} ...")
-        result = subprocess.run(["rsync", "-a", "--no-delete", "--partial", src, dst])
+        transfer_cmd = ["rsync", "-a", "--partial"]
+        if args.verbose:
+            transfer_cmd.append("-v")
+        transfer_cmd += [src, dst]
+        result = subprocess.run(transfer_cmd)
         if result.returncode != 0:
             print(
                 f"rsync transfer exited {result.returncode} — continuing to verify ...",
                 file=sys.stderr,
             )
 
-    verify_cmd = ["rsync", "-an", "--delete", "--itemize-changes"]
+    verify_cmd = ["rsync", "-anv", "--delete", "--itemize-changes"]
     if args.checksum:
         verify_cmd.append("-c")
     verify_cmd += [src, dst]
     method = "byte-checked (rsync -c)" if args.checksum else "size+mtime verified"
     print(f"Verifying ({method}) ...")
     result = subprocess.run(verify_cmd, capture_output=True, text=True)
+    if args.verbose and result.stdout.strip():
+        print(result.stdout.rstrip())
     if result.returncode != 0:
         print(f"rsync verify failed (exit {result.returncode}):", file=sys.stderr)
         if result.stderr.strip():
@@ -898,9 +905,9 @@ def cmd_backup(args: argparse.Namespace) -> int:
         print("Backup watermark NOT advanced.", file=sys.stderr)
         return 1
 
-    if not result.stdout.strip():
+    if not rsync_has_summary(result.stdout):
         print(
-            "Error: rsync produced no output — connection may have failed silently. "
+            "Error: rsync produced no completion summary — connection may have failed silently. "
             "Backup watermark NOT advanced.",
             file=sys.stderr,
         )
@@ -947,14 +954,26 @@ def cmd_backup(args: argparse.Namespace) -> int:
                 f"{media}: computed watermark ({computed}) is before stored "
                 f"({stored}) — keeping stored"
             )
-        if new_wm is not None:
+        if not args.dry_run and new_wm is not None:
             cam_backups[media] = new_wm
 
         total_local = len(local_names)
-        on_server = total_local - len(pending_canon)
+        confirmed_names = local_names - pending_canon
+        on_server = len(confirmed_names)
         still_pending = len(pending_canon)
 
-        if new_wm != stored:
+        def _date_range(names: set[str]) -> str:
+            dates = sorted(d for n in names if (d := date_from_name(n)) is not None)
+            return f"{dates[0][:10]} → {dates[-1][:10]}" if dates else "—"
+
+        if args.dry_run:
+            if new_wm != stored:
+                wm_tag = f"{stored or '(none)'} → {new_wm}  [would advance, dry-run]"
+            elif stored is not None:
+                wm_tag = f"{new_wm}  [no change]"
+            else:
+                wm_tag = "(none)"
+        elif new_wm != stored:
             wm_tag = f"{stored or '(none)'} → {new_wm}  [advanced]"
             wm_advanced.append(f"{media}: {stored or '(none)'} → {new_wm}")
         elif stored is not None:
@@ -962,10 +981,17 @@ def cmd_backup(args: argparse.Namespace) -> int:
         else:
             wm_tag = "(none)"
 
-        print(
-            f"  {media}: {total_local} local, {on_server} on server, "
-            f"{still_pending} pending  |  watermark {wm_tag}"
-        )
+        print(f"  {media}: {total_local} local, {on_server} on server, {still_pending} pending")
+        print(f"    watermark:  {wm_tag}")
+        if on_server:
+            print(f"    confirmed:  {on_server:>5} files  {_date_range(confirmed_names)}")
+        if still_pending:
+            label = "to transfer" if args.dry_run else "pending"
+            print(f"    {label}:    {still_pending:>5} files  {_date_range(pending_canon)}")
+
+        if args.dry_run and pending_canon:
+            for name in sorted(pending_canon):
+                print(f"      + {name}")
 
         if still_pending:
             pending_by_type.append(f"{still_pending} {media}")
@@ -1025,6 +1051,10 @@ def cmd_backup(args: argparse.Namespace) -> int:
         ("pending: " + ", ".join(pending_by_type)) if pending_by_type else "nothing pending"
     )
     print("\n  Result: " + "  ·  ".join(summary_parts))
+
+    if args.dry_run:
+        print("  (dry-run — nothing transferred, watermark not saved)")
+        return 0
 
     config.save_backups(backups)
     return 0
@@ -1312,7 +1342,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="use rsync -c for byte-level verify (slower)",
     )
     p_backup.add_argument(
-        "--verify-only",
+        "--verbose",
+        action="store_true",
+        help="show rsync output during transfer and verify",
+    )
+    p_backup.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="skip transfer; show what would be synced without advancing the watermark",
+    )
+    p_backup.add_argument(
+        "--verify-only", "-v",
         action="store_true",
         help="skip transfer; re-verify and advance watermark",
     )

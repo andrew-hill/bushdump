@@ -4,6 +4,7 @@ from bushdump.backup import (
     media_names_of_kind,
     parse_rsync_extra,
     parse_rsync_pending,
+    rsync_has_summary,
     safe_watermark,
 )
 
@@ -136,6 +137,35 @@ def test_parse_rsync_extra_ignores_directories():
     assert "20260509T120000_00000001.jpg" in result
     assert "subdir/" not in result
     assert "subdir" not in result
+
+
+# --- rsync_has_summary ---
+
+
+def test_rsync_has_summary_present():
+    output = (
+        "sending incremental file list\n\n"
+        "sent 2,034 bytes  received 17 bytes  4,102.00 bytes/sec\n"
+        "total size is 9,876,543  speedup is 4,800.11 (DRY RUN)\n"
+    )
+    assert rsync_has_summary(output) is True
+
+
+def test_rsync_has_summary_with_pending_files():
+    output = (
+        ">f+++++++++ 20260510T130001_00000001.jpg\n"
+        "sent 1,234 bytes  received 8 bytes  2,484.00 bytes/sec\n"
+        "total size is 5,000,000  speedup is 4,000.00 (DRY RUN)\n"
+    )
+    assert rsync_has_summary(output) is True
+
+
+def test_rsync_has_summary_absent():
+    assert rsync_has_summary("") is False
+
+
+def test_rsync_has_summary_partial_output():
+    assert rsync_has_summary("sending incremental file list\n") is False
 
 
 # --- media_names_of_kind ---

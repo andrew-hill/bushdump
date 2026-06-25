@@ -31,7 +31,7 @@ def parse_rsync_pending(dry_run_output: str) -> set[str]:
     result: set[str] = set()
     for line in dry_run_output.splitlines():
         line = line.strip()
-        if not line or line[0] in (".", "*"):
+        if not line or line[0] not in ("<", ">", "c", "h"):
             continue
         space_idx = line.find(" ")
         if space_idx < 2:
@@ -98,6 +98,19 @@ def safe_watermark(local_names: Iterable[str], blocked: set[str]) -> str | None:
     earliest_blocked = min(blocked_dates)
     confirmed = [d for d in dated if d < earliest_blocked]
     return max(confirmed) if confirmed else None
+
+
+def rsync_has_summary(output: str) -> bool:
+    """True if rsync verbose output contains the stats summary line.
+
+    With -v, rsync always prints 'sent N bytes  received M bytes ...' even when
+    nothing needs transferring. Absence of this line means rsync didn't complete
+    (e.g. connection dropped before finishing).
+    """
+    for line in output.splitlines():
+        if line.startswith("sent ") and "bytes" in line:
+            return True
+    return False
 
 
 def validate_watermark(value: str) -> bool:
