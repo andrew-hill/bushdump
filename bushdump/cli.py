@@ -1021,8 +1021,8 @@ def cmd_backup(args: argparse.Namespace) -> int:
         }
         if behind_wm:
             warnings.append(
-                f"{media}: {len(behind_wm)} pending file(s) are behind the watermark"
-                f" — expected on server already"
+                f"{media}: {len(behind_wm)} pending file(s) are not in sync on server"
+                f" — investigate the files listed above"
             )
         sidecar_behind_wm = {
             n for n in sidecar_blocked

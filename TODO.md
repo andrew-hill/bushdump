@@ -13,18 +13,31 @@
 
 ### `bd backup` / `bd prune`
 
-- [ ] Set `rsync_target` in config; run `bd backup <name>` — confirm files
-      copy to target and `backups.json` advances the watermark.
-- [ ] Drop a `.error.txt` sidecar next to a recent local file before running
-      `bd backup <name>` — confirm the watermark caps below it.
-- [ ] Run `bd backup <name> --verify-only` after the watermark is already set;
-      then remove a file from the rsync target and re-run — confirm the watermark
-      stays put (advance-only) and prints a regression warning.
-- [ ] Run `bd prune <name> --before <date>` without `--confirm` — confirm a
-      correct DELETE/SKIP table is printed and the camera file count is unchanged.
-- [ ] With one known-backed-up old file: `bd prune <name> --before <date> --confirm`,
-      type the token — confirm that file disappears from `bd ls`, the local copy
-      and `state.json` are untouched.
+**Backup multi-camera**
+- [ ] `bd backup` with no camera name should back up all configured cameras in
+      sequence (mirrors `bd sync` behaviour). Most common use case.
+- [ ] Design the multi-camera output so per-camera results are clearly separated
+      and a final summary makes any issues easy to spot — individual camera blocks
+      shouldn't scroll past before the user can review them.
+
+**Backup happy path**
+- [ ] Full cycle: `bd sync` → `bd backup` → `bd prune` — confirm each step
+      sees the state left by the prior.  *(needs camera in range)*
+
+**Backup flags**
+- [ ] Failed transfer (kill rsync mid-flight): watermark does NOT advance.  *(needs large transfer in flight to test)*
+
+**Backup edge cases**
+
+**Prune guards**
+- [ ] `bd prune <name> --before <date>` without `--confirm`: correct DELETE/SKIP
+      table printed, camera file count unchanged.
+- [ ] Wrong count in `DELETE <count>` token: rejected.
+- [ ] No backup watermark covering the files to prune: refused.  *(needs camera in range)*
+- [ ] Local size mismatch (local file differs from camera copy): blocks that file.
+- [ ] `.error.txt` sidecar present: blocks pruning that file.
+- [ ] Known-backed-up old file with `--confirm` and correct token: file disappears
+      from `bd ls`, local copy and `state.json` untouched.
 
 ### `bd sync --retry`
 
