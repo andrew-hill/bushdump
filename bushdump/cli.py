@@ -12,6 +12,7 @@ import datetime
 import functools
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Callable
@@ -177,12 +178,35 @@ def cmd_cameras(args: argparse.Namespace) -> int:
     if not cfg.cameras:
         print("No cameras configured. Run `bushdump register` (or edit the config).")
         return 0
+    meta = config.load_meta()
     for name, cam in cfg.cameras.items():
         print(name)
+        ident = meta.get(name, {})
+        if ident:
+            model_str = " ".join(filter(None, [ident.get("brand"), ident.get("product")]))
+            ver = ident.get("ver", "")
+            last_seen = ident.get("last_seen", "")
+            suffix = f"  (last seen {last_seen})" if last_seen else ""
+            print(f"    model:  {model_str}  {ver}{suffix}".rstrip())
         print(f"    ssid:   {cam.ssid or '(unset)'}")
         print(f"    ble:    {cam.ble_address or '(unset)'}")
         print(f"    output: {cam.output_dir}")
     return 0
+
+
+def _cache_identity(client: "CameraClient", cam_name: str) -> None:
+    """Fetch /cmd/info/1 and persist it to meta.json. Best-effort — never raises."""
+    import datetime as _dt
+
+    try:
+        ident = client.identity()
+        if not ident:
+            return
+        meta = config.load_meta()
+        meta[cam_name] = {**ident, "last_seen": _dt.date.today().isoformat()}
+        config.save_meta(meta)
+    except Exception:
+        pass
 
 
 def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
@@ -246,11 +270,17 @@ def cmd_stats(args: argparse.Namespace) -> int:
             print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
             return 1
         print("Camera ready.")
+        _cache_identity(client, args.name)
         s = client.stats()
         sd_pct = round(s.sd_used_kb / s.sd_total_kb * 100) if s.sd_total_kb else 0
         sd_used_gb = s.sd_used_kb / (1024 * 1024)
         sd_total_gb = s.sd_total_kb / (1024 * 1024)
         ext = "  (ext power)" if s.ext_power else ""
+        ident = config.load_meta().get(args.name, {})
+        if ident:
+            model_str = " ".join(filter(None, [ident.get("brand"), ident.get("product")]))
+            ver = ident.get("ver", "")
+            print(f"Model:       {model_str}  {ver}".rstrip())
         print(f"Battery:     {s.battery}%{ext}")
         print(f"Temperature: {s.temperature}°C")
         print(f"SD card:     {sd_used_gb:.1f} / {sd_total_gb:.1f} GB used ({sd_pct}%)")
@@ -505,6 +535,7 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
             _out(f"  {cam.name}: camera did not respond over HTTP — skipping.", err=True)
             return 0, []
         _out("Camera ready.")
+        _cache_identity(client, cam.name)
         _run_health_checks(client, cam, interactive=True)
 
         cam_state = state.setdefault(cam.name, {})
@@ -554,7 +585,7 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                     downloaded_count += 1
                     avg_bytes += f.size
                     avg_elapsed += file_elapsed
-                    parts: list[str] = [f"{done_count}/{len(todo)}"]
+                    parts: list[str] = [f"{downloaded_count}/{truly_new or len(todo)}"]
                     if file_elapsed > 0.01:
                         parts.append(f"{f.size / file_elapsed / 1_000_000:.1f} MB/s")
                     if avg_elapsed > 0.1:
@@ -839,6 +870,597 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def _backup_one(
+    cam: config.Camera,
+    args: argparse.Namespace,
+    cfg: config.AppConfig,
+    backups: dict,
+    rsync_bin: str,
+    src: str,
+    dst: str,
+) -> dict:
+    """Run backup for one camera; print progress. Mutates backups[cam.name] in-place."""
+    from bushdump.backup import (
+        advance_watermark,
+        date_from_name,
+        media_names_of_kind,
+        parse_rsync_extra,
+        parse_rsync_pending,
+        parse_rsync_transfer_count,
+        rsync_has_summary,
+        safe_watermark,
+        validate_watermark,
+    )
+    from bushdump.prune import scan_local_dir
+
+    _FAIL: dict = {
+        "ok": False, "media": {}, "warnings": [], "pending_by_type": [], "wm_advanced": [],
+    }
+    _KIND = {"Photo": "JPG", "Video": "MP4"}
+
+    cam_backups = backups.setdefault(cam.name, {})
+
+    for media, wm in cam_backups.items():
+        if not validate_watermark(wm):
+            print(
+                f"Error: backup watermark for {cam.name}/{media} in "
+                f"{config.BACKUPS_PATH} is not a valid timestamp: {wm!r}\n"
+                f"Expected format: YYYY-MM-DD HH:MM:SS (zero-padded, e.g. "
+                f"2026-06-12 07:40:00)",
+                file=sys.stderr,
+            )
+            return _FAIL
+
+    if not args.verify_only and not args.dry_run:
+        print(f"  Transferring → {dst} ...")
+        transfer_cmd = [rsync_bin, "-rlt", "--partial", "--stats"] + cfg.backup.args
+        if args.verbose:
+            transfer_cmd.append("-v")
+        transfer_cmd += [src, dst]
+        proc = subprocess.Popen(transfer_cmd, stdout=subprocess.PIPE, text=True)
+        stats_lines: list[str] = []
+        assert proc.stdout
+        for line in proc.stdout:
+            if args.verbose:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            stats_lines.append(line)
+        proc.wait()
+        stats_text = "".join(stats_lines)
+        transferred = parse_rsync_transfer_count(stats_text)
+        if transferred is not None:
+            t_str = f"{transferred} file(s) transferred"
+            print(f"  {_ansi(t_str, '32') if transferred > 0 else t_str}.")
+        if proc.returncode != 0:
+            print(
+                f"  rsync transfer exited {proc.returncode} — continuing to verify ...",
+                file=sys.stderr,
+            )
+
+    verify_cmd = [rsync_bin, "-rltnv", "--delete", "--itemize-changes"]
+    if args.checksum:
+        verify_cmd.append("-c")
+    verify_cmd += [src, dst]
+    method = "byte-checked (rsync -c)" if args.checksum else "size+mtime verified"
+    print(f"  Verifying ({method}) ...")
+    verify_result = subprocess.run(verify_cmd, capture_output=True, text=True)
+    if args.verbose and verify_result.stdout.strip():
+        print(verify_result.stdout.rstrip())
+    if verify_result.returncode != 0:
+        print(f"  rsync verify failed (exit {verify_result.returncode}):", file=sys.stderr)
+        if verify_result.stderr.strip():
+            print(verify_result.stderr.strip(), file=sys.stderr)
+        print("  Backup watermark NOT advanced.", file=sys.stderr)
+        return _FAIL
+
+    if not rsync_has_summary(verify_result.stdout):
+        print(
+            "  Error: rsync produced no completion summary — connection may have failed silently. "
+            "Backup watermark NOT advanced.",
+            file=sys.stderr,
+        )
+        return _FAIL
+
+    pending_names = parse_rsync_pending(verify_result.stdout)
+    extra_names = parse_rsync_extra(verify_result.stdout)
+    local_files = scan_local_dir(cam.output_dir)
+    local_names_all = set(local_files.keys())
+
+    def _date_range(names: set[str]) -> str:
+        dates = sorted(d for n in names if (d := date_from_name(n)) is not None)
+        return f"{dates[0][:10]} → {dates[-1][:10]}" if dates else "—"
+
+    warnings: list[str] = []
+    wm_advanced: list[str] = []
+    pending_by_type: list[str] = []
+    media_results: dict[str, dict] = {}
+
+    for media in args.media:
+        kind = _KIND[media]
+        local_names = media_names_of_kind(local_names_all, kind)
+        pending_canon = media_names_of_kind(pending_names, kind)
+        sidecar_blocked = media_names_of_kind(
+            {n for n, lf in local_files.items() if lf.has_error_sidecar}, kind
+        )
+        blocked = pending_canon | sidecar_blocked
+        computed = safe_watermark(local_names, blocked)
+        stored = cam_backups.get(media)
+        new_wm, regressed = advance_watermark(computed, stored)
+        if regressed:
+            warnings.append(
+                f"{media}: computed watermark ({computed}) is before stored "
+                f"({stored}) — keeping stored"
+            )
+        if not args.dry_run and new_wm is not None:
+            cam_backups[media] = new_wm
+
+        total_local = len(local_names)
+        confirmed_names = local_names - pending_canon
+        on_server = len(confirmed_names)
+        still_pending = len(pending_canon)
+        did_advance = new_wm != stored
+
+        if args.dry_run:
+            if did_advance:
+                wm_tag = f"{stored or '(none)'} → {new_wm}  [would advance, dry-run]"
+            elif stored is not None:
+                wm_tag = f"{new_wm}  [no change]"
+            else:
+                wm_tag = "(none)"
+        elif did_advance:
+            wm_tag = f"{stored or '(none)'} → {new_wm}  [advanced]"
+            wm_advanced.append(f"{media}: {stored or '(none)'} → {new_wm}")
+        elif stored is not None:
+            wm_tag = f"{new_wm}  [no change]"
+        else:
+            wm_tag = "(none)"
+
+        pending_col = _ansi(str(still_pending), "1;33") if still_pending > 0 else _ansi("0", "2")
+        print(f"  {media}: {total_local} local, {on_server} on server, {pending_col} pending")
+
+        if did_advance and not args.dry_run:
+            wm_colored = _ansi(wm_tag, "32")
+        elif "[no change]" in wm_tag or wm_tag == "(none)":
+            wm_colored = _ansi(wm_tag, "2")
+        else:
+            wm_colored = wm_tag
+        print(f"    watermark:  {wm_colored}")
+
+        if on_server:
+            print(f"    confirmed:  {on_server:>5} files  {_date_range(confirmed_names)}")
+        if still_pending:
+            label = "to transfer" if args.dry_run else "pending"
+            print(f"    {label}:    {still_pending:>5} files  {_date_range(pending_canon)}")
+        if args.dry_run and pending_canon:
+            for name in sorted(pending_canon):
+                print(f"      + {name}")
+
+        if still_pending:
+            pending_by_type.append(f"{still_pending} {media}")
+
+        behind_wm = {
+            n for n in pending_canon
+            if new_wm and (d := date_from_name(n)) and d <= new_wm
+        }
+        if behind_wm:
+            warnings.append(
+                f"{media}: {len(behind_wm)} pending file(s) are not in sync on server"
+                f" — investigate the files listed above"
+            )
+        sidecar_behind_wm = {
+            n for n in sidecar_blocked
+            if new_wm and (d := date_from_name(n)) and d <= new_wm
+        }
+        if sidecar_behind_wm:
+            warnings.append(
+                f"{media}: {len(sidecar_behind_wm)} file(s) have .error.txt sidecars"
+                f" at or behind the watermark — watermark has advanced past a broken file"
+            )
+        server_extra = media_names_of_kind(extra_names, kind)
+        if server_extra:
+            warnings.append(
+                f"{media}: {len(server_extra)} file(s) on server not present locally"
+            )
+
+        media_results[media] = {
+            "local": total_local,
+            "backed": on_server,
+            "pending": still_pending,
+            "wm_advanced": did_advance and not args.dry_run,
+            "wm_is_none": new_wm is None,
+            "regressed": regressed,
+            "behind_wm_count": len(behind_wm),
+            "sidecar_blocked_count": len(sidecar_blocked),
+            "sidecar_behind_wm_count": len(sidecar_behind_wm),
+            "server_extra_count": len(server_extra),
+        }
+
+    all_canonical = (
+        media_names_of_kind(pending_names, "JPG") | media_names_of_kind(pending_names, "MP4")
+    )
+    if pending_names - all_canonical:
+        warnings.append(
+            f"{len(pending_names - all_canonical)} non-media file(s) differ from server"
+        )
+    all_canonical_extra = (
+        media_names_of_kind(extra_names, "JPG") | media_names_of_kind(extra_names, "MP4")
+    )
+    extra_noncanon = extra_names - all_canonical_extra
+    if extra_noncanon:
+        warnings.append(
+            f"{len(extra_noncanon)} non-media file(s) on server not present locally"
+        )
+
+    if warnings:
+        print(f"\n  {len(warnings)} warning(s):")
+        for w in warnings:
+            print(_ansi(f"    [!] {w}", "1;33"))
+
+    summary_parts = []
+    if wm_advanced:
+        summary_parts.append("watermark advanced: " + ", ".join(wm_advanced))
+    else:
+        summary_parts.append("watermark unchanged")
+    if pending_by_type:
+        summary_parts.append(_ansi("pending: " + ", ".join(pending_by_type), "1;33"))
+    else:
+        summary_parts.append(_ansi("nothing pending", "32"))
+    print("\n  Result: " + "  ·  ".join(summary_parts))
+
+    if args.dry_run:
+        print("  (dry-run — nothing transferred, watermark not saved)")
+
+    return {
+        "ok": True,
+        "media": media_results,
+        "warnings": warnings,
+        "pending_by_type": pending_by_type,
+        "wm_advanced": wm_advanced,
+    }
+
+
+@_handle_expected_camera_errors
+def cmd_backup(args: argparse.Namespace) -> int:
+    """Rsync local output → NAS, verify, advance backup watermark."""
+    import shutil
+
+    cfg = config.load_config()
+    if not cfg.cameras:
+        print("No cameras configured. Run `bushdump register` first.", file=sys.stderr)
+        return 1
+
+    if args.name:
+        if args.name not in cfg.cameras:
+            print(
+                f"Unknown camera {args.name!r}. Configured: {', '.join(cfg.cameras) or '(none)'}",
+                file=sys.stderr,
+            )
+            return 1
+        cameras = [cfg.cameras[args.name]]
+    else:
+        cameras = list(cfg.cameras.values())
+
+    base = (getattr(args, "to", None) or "").strip() or cfg.backup.target or ""
+    if not base:
+        print(
+            "Error: no rsync target configured. Add a [backup] section to config or pass --to.",
+            file=sys.stderr,
+        )
+        return 1
+
+    rsync_bin = cfg.backup.rsync_bin
+    if shutil.which(rsync_bin) is None:
+        print(f"Error: rsync binary {rsync_bin!r} not found on PATH.", file=sys.stderr)
+        return 1
+
+    backups = config.load_backups()
+    all_ok = True
+    all_results: list[tuple[config.Camera, dict]] = []
+
+    _DIV_W = 56
+    for cam in cameras:
+        header = f"── {cam.name} "
+        header += "─" * max(0, _DIV_W - len(header))
+        print(_ansi(header, "1"))
+
+        src = str(cam.output_dir).rstrip("/") + "/"
+        dst = base.rstrip("/") + "/" + cam.name + "/"
+
+        result = _backup_one(cam, args, cfg, backups, rsync_bin, src, dst)
+        all_results.append((cam, result))
+
+        if result["ok"] and not args.dry_run:
+            config.save_backups(backups)
+        if not result["ok"]:
+            all_ok = False
+
+    if len(cameras) > 1:
+        _print_backup_summary(all_results, args)
+
+    return 0 if all_ok else 1
+
+
+def _print_backup_summary(
+    all_results: list[tuple[config.Camera, dict]],
+    args: argparse.Namespace,
+) -> None:
+    """Print the multi-camera summary table."""
+    DIV_W = 72
+    media_types = list(args.media)
+    name_w = max(len(cam.name) for cam, _ in all_results)
+
+    # Measure column widths from actual data before printing anything.
+    backed_w = max(
+        len("backed"),
+        max(
+            (
+                len(f"{mr.get('backed', 0)}/{mr.get('local', 0)}")
+                for _, r in all_results
+                for m in media_types
+                for mr in [r["media"].get(m, {})]
+            ),
+            default=0,
+        ),
+    )
+    pending_w = max(
+        len("pending"),
+        max(
+            (
+                len(str(r["media"].get(m, {}).get("pending", 0)))
+                for _, r in all_results
+                for m in media_types
+            ),
+            default=0,
+        ),
+    )
+    # One media block: backed + 2sp + pending + space + flag(1). 2-space gap between blocks.
+    block_w = backed_w + 2 + pending_w + 2
+
+    header = "══ Summary "
+    header += "═" * max(0, DIV_W - len(header))
+    print(f"\n{_ansi(header, '1')}")
+
+    prefix = " " * (name_w + 2)
+
+    # Row 1: media type names centred over each block.
+    row1 = prefix
+    for i, m in enumerate(media_types):
+        sep = "  " if i < len(media_types) - 1 else ""
+        row1 += m.center(block_w) + sep
+    print(row1.rstrip())
+
+    # Row 2: column labels; ≡ marks the flag position after each pending column.
+    row2 = prefix
+    for i, _ in enumerate(media_types):
+        sep = "  " if i < len(media_types) - 1 else ""
+        row2 += "backed".rjust(backed_w) + "  " + "pending".rjust(pending_w) + " ≡" + sep
+    row2 += "   Result"
+    print(row2)
+
+    def _media_flag(mr: dict) -> tuple[str, str]:
+        """Return (symbol, ansi_code) status flag for one media column."""
+        # Priority: red > yellow-! > yellow-~ > green > blank.
+        if mr.get("local", 0) == 0 and mr.get("server_extra_count", 0) == 0:
+            return " ", ""
+        if (mr.get("behind_wm_count", 0) > 0
+                or mr.get("sidecar_behind_wm_count", 0) > 0
+                or mr.get("regressed", False)):
+            return "✗", "1;31"
+        # Files exist on server but not locally — down to one copy.
+        if mr.get("server_extra_count", 0) > 0:
+            return "!", "1;33"
+        # Pending/blocked but watermark is honest.
+        if (mr.get("pending", 0) > 0
+                or mr.get("sidecar_blocked_count", 0) > 0
+                or (mr.get("local", 0) > 0 and mr.get("wm_is_none", False))):
+            return "~", "1;33"
+        return "✓", "32"
+
+    # Data rows — backed  pending flag; Result column at right edge.
+    flags_used: set[str] = set()
+    for cam, result in all_results:
+        line = cam.name.ljust(name_w + 2)
+        for i, media in enumerate(media_types):
+            sep = "  " if i < len(media_types) - 1 else ""
+            if not result["ok"]:
+                line += "error".ljust(block_w) + sep
+                flags_used.add("✗")
+                continue
+            mr = result["media"].get(media, {})
+            backed = mr.get("backed", 0)
+            total = mr.get("local", 0)
+            pending = mr.get("pending", 0)
+            backed_raw = f"{backed}/{total}"
+            backed_plain = backed_raw.rjust(backed_w)
+            backed_str = (
+                " " * (backed_w - len(backed_raw)) + _ansi(backed_raw, "2")
+                if backed == 0 and total == 0
+                else backed_plain
+            )
+            flag_char, flag_code = _media_flag(mr)
+            if flag_char not in (" ", "✓"):
+                flags_used.add(flag_char)
+            marker = _ansi(flag_char, flag_code) if flag_code else flag_char
+            # Pad with plain spaces first so ANSI codes don't disturb width.
+            p_num = str(pending)
+            p_pad = " " * (pending_w - len(p_num))
+            p_colored = p_pad + (_ansi(p_num, "1;33") if pending > 0 else _ansi(p_num, "2"))
+            line += backed_str + "  " + p_colored + " " + marker + sep
+
+        # Result column.
+        line += "   "
+        if not result["ok"]:
+            line += _ansi("failed", "1;31")
+        else:
+            pending_by_type = result.get("pending_by_type", [])
+            if pending_by_type:
+                line += _ansi(", ".join(pending_by_type) + " pending", "1;33")
+            else:
+                line += _ansi("nothing pending", "32")
+        print(line)
+
+    # Legend: only show symbols that actually appeared in the table.
+    _LEGEND = [
+        ("~", "1;33", "files not yet on server (watermark held back)"),
+        ("!", "1;33", "file on server not present locally — down to one copy"),
+        ("✗", "1;31", "watermark inconsistency — do not prune"),
+    ]
+    if flags_used:
+        print()
+        for flag, code, meaning in _LEGEND:
+            if flag in flags_used:
+                print(f"  {_ansi(flag, code)}  {meaning}")
+
+
+@_handle_expected_camera_errors
+def cmd_prune(args: argparse.Namespace) -> int:
+    """List or delete old backed-up files from the camera SD card."""
+    from bushdump.camera import CameraClient
+    from bushdump.prune import PruneVerdict, classify_for_prune, parse_cutoff, scan_local_dir
+
+    cam = _resolve_camera(args.name)
+    if cam is None:
+        return 1
+
+    cam_backups = config.load_backups().get(args.name, {})
+
+    if args.before is not None:
+        try:
+            cutoff = parse_cutoff(args.before)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    else:
+        watermarks = [cam_backups[m] for m in args.media if m in cam_backups]
+        if not watermarks:
+            print(
+                "Error: no backup watermark found for this camera — run `bushdump backup` first, "
+                "or pass --before DATE explicitly.",
+                file=sys.stderr,
+            )
+            return 1
+        cutoff = parse_cutoff(min(watermarks))
+
+    _wake_join(cam)
+
+    with CameraClient(cam.camera_host) as client:
+        print("Waiting for camera to respond...")
+        if not client.wait_until_ready():
+            print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
+            return 1
+        print("Camera ready.")
+        _cache_identity(client, args.name)
+        print("Listing files...")
+        all_files = client.list_all_files()
+
+        local = scan_local_dir(cam.output_dir)
+
+        print(_ansi("⚠  The following files will be permanently deleted from the SD card if you confirm below.", "1;33"))
+
+        all_verdicts: list[PruneVerdict] = []
+        total_deletable = 0
+        total_skipped = 0
+        total_outside_range = 0
+        total_bytes = 0
+        delete_dates: list[str] = []
+
+        for media in args.media:
+            type_code = _MEDIA_TYPE_CODE[media]
+            files = [f for f in all_files if f.type == type_code]
+            backup_watermark = cam_backups.get(media)
+            verdicts = classify_for_prune(
+                files,
+                local=local,
+                backup_watermark=backup_watermark,
+                cutoff_date=cutoff,
+            )
+            all_verdicts.extend(verdicts)
+            for v in verdicts:
+                if v.file.date >= cutoff:
+                    total_outside_range += 1
+                    continue
+                size_kb = v.file.size // 1024
+                if v.deletable:
+                    print(f"  DELETE  {v.file.name}  {v.file.date}  {size_kb:>8} KB")
+                    total_deletable += 1
+                    total_bytes += v.file.size
+                    delete_dates.append(v.file.date)
+                else:
+                    print(f"  SKIP: {v.reason:<40}  {v.file.name}")
+                    total_skipped += 1
+
+        size_mb = total_bytes / 1_000_000
+        date_range_str = f"{min(delete_dates)[:10]} → {max(delete_dates)[:10]}" if delete_dates else "—"
+        print(f"\n  delete range:  {date_range_str}")
+        print(f"  in range:      {total_deletable} to delete, {total_skipped} skipped, {size_mb:.1f} MB")
+        print(f"  outside range: {total_outside_range} not considered (newer than {cutoff[:10]})")
+
+        if not sys.stdin.isatty():
+            print("Non-interactive — showing plan only. Run in a terminal to confirm and delete.")
+            return 0
+
+        if total_deletable == 0:
+            print("Nothing to delete.")
+            return 0
+
+        token = f"DELETE {total_deletable}"
+        print(
+            f"\nPermanently delete {total_deletable} files ({size_mb:.1f} MB) from "
+            f"{args.name}'s SD card — cannot be undone."
+        )
+
+        confirmed = False
+        while not confirmed:
+            # Send keepalives in background so the camera doesn't sleep while
+            # the user reads the plan and types the confirmation token.
+            stop_keepalive = threading.Event()
+
+            def _keepalive_loop() -> None:
+                while not stop_keepalive.wait(timeout=10):
+                    client.keep_alive()
+
+            ka_thread = threading.Thread(target=_keepalive_loop, daemon=True)
+            ka_thread.start()
+            try:
+                answer = input(f"Type  {token}  to proceed (Ctrl+C to cancel): ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
+                stop_keepalive.set()
+                return 0
+            finally:
+                stop_keepalive.set()
+
+            if answer.strip() == token:
+                confirmed = True
+            else:
+                print(f"Token mismatch — got {answer.strip()!r}, expected {token!r}. Try again.")
+
+        deleted = 0
+        last_alive = time.monotonic()
+        delete_failed = False
+        for v in all_verdicts:
+            if not v.deletable:
+                continue
+            now = time.monotonic()
+            if now - last_alive > 10:
+                client.keep_alive()
+                last_alive = now
+            try:
+                client.delete(v.file)
+                print(f"deleted {v.file.name}")
+                deleted += 1
+            except Exception as e:
+                print(f"Error deleting {v.file.name}: {e}", file=sys.stderr)
+                print(f"Stopped after {deleted}/{total_deletable} deletions.", file=sys.stderr)
+                delete_failed = True
+                break
+
+        if delete_failed:
+            return 1
+
+    return 0
+
+
 def cmd_completions(args: argparse.Namespace) -> int:
     print(argcomplete.shellcode([args._prog], shell=args.shell), end="")
     return 0
@@ -865,6 +1487,10 @@ def build_parser() -> argparse.ArgumentParser:
     settings          show current camera settings (read-only)
     clock             show raw camera clock response; optionally sync to UTC
     keepalive, ka     keep the camera's WiFi alive (Ctrl+C to stop)
+
+  Maintenance (SD card):
+    backup            rsync local output to NAS; advance backup watermark
+    prune             delete old backed-up files from the camera SD card
 """,
         usage="%(prog)s [--version] <command> ...",
         add_help=False,
@@ -990,6 +1616,71 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-download files that previously failed validation (.error.txt sidecars)",
     )
     p_sync.set_defaults(func=cmd_sync)
+
+    p_backup = sub.add_parser(
+        "backup",
+        help="rsync local output to NAS; advance backup watermark",
+    )
+    p_backup.add_argument(
+        "name", nargs="?", default=None, help="camera name (default: all cameras)"
+    )
+    p_backup.add_argument(
+        "--to",
+        dest="to",
+        default="",
+        metavar="BASE",
+        help="rsync base target (overrides config [backup] target); camera name is appended automatically",
+    )
+    p_backup.add_argument(
+        "--checksum",
+        action="store_true",
+        help="use rsync -c for byte-level verify (slower)",
+    )
+    p_backup.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show rsync output during transfer and verify",
+    )
+    p_backup.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="skip transfer; show what would be synced without advancing the watermark",
+    )
+    p_backup.add_argument(
+        "--verify-only", "-v",
+        action="store_true",
+        help="skip transfer; re-verify and advance watermark",
+    )
+    p_backup.add_argument(
+        "--media",
+        nargs="*",
+        choices=MEDIA_TYPES,
+        default=list(MEDIA_TYPES),
+        metavar="TYPE",
+        help="media types to process (Photo, Video; default: both)",
+    )
+    p_backup.set_defaults(func=cmd_backup)
+
+    p_prune = sub.add_parser(
+        "prune",
+        help="delete old backed-up files from the camera SD card (shows plan, then prompts)",
+    )
+    p_prune.add_argument("name", help="camera name (from `bd cameras`)")
+    p_prune.add_argument(
+        "--before",
+        default=None,
+        metavar="DATE",
+        help="delete files with date before this (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS); defaults to the backup watermark",
+    )
+    p_prune.add_argument(
+        "--media",
+        nargs="*",
+        choices=MEDIA_TYPES,
+        default=list(MEDIA_TYPES),
+        metavar="TYPE",
+        help="media types to process (Photo, Video; default: both)",
+    )
+    p_prune.set_defaults(func=cmd_prune)
 
     p_completions = sub.add_parser("completions", help="print shell completion script")
     p_completions.add_argument("shell", choices=["zsh", "bash", "fish"])

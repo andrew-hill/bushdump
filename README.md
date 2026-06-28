@@ -27,6 +27,13 @@ fundamentally a file copy.
   (uv fetches the right Python version automatically — no separate Python install needed.)
 - macOS with Bluetooth + WiFi hardware. BushDump uses macOS's built-in
   CoreWLAN/`networksetup` tooling for WiFi scanning and joining.
+- **rsync** (for `backup`): macOS ships rsync 2.6.9, which is missing options
+  like `--chown`. If you need those, install a modern version:
+  ```bash
+  brew install rsync
+  ```
+  Then set `rsync_bin` in your `[backup]` config to the installed binary
+  (typically `/opt/homebrew/bin/rsync` on Apple Silicon; run `which rsync` to confirm).
 
 ## Installation
 
