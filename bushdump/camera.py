@@ -412,6 +412,14 @@ class CameraClient:
             video_count=video_count,
         )
 
+    def identity(self) -> dict[str, str]:
+        """Fetch /cmd/info/1 and return {brand, product, model, ver}. Best-effort; empty on failure."""
+        try:
+            data = self._client.get("/cmd/info/1").json().get("data", {})
+            return {k: str(data[k]) for k in ("brand", "product", "model", "ver") if k in data}
+        except Exception:
+            return {}
+
     def describe(self) -> str:
         """One-line summary for the add-confirm step (best-effort)."""
         label = f"camera at {self.host}"

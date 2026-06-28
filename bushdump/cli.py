@@ -12,6 +12,7 @@ import datetime
 import functools
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Callable
@@ -177,12 +178,35 @@ def cmd_cameras(args: argparse.Namespace) -> int:
     if not cfg.cameras:
         print("No cameras configured. Run `bushdump register` (or edit the config).")
         return 0
+    meta = config.load_meta()
     for name, cam in cfg.cameras.items():
         print(name)
+        ident = meta.get(name, {})
+        if ident:
+            model_str = " ".join(filter(None, [ident.get("brand"), ident.get("product")]))
+            ver = ident.get("ver", "")
+            last_seen = ident.get("last_seen", "")
+            suffix = f"  (last seen {last_seen})" if last_seen else ""
+            print(f"    model:  {model_str}  {ver}{suffix}".rstrip())
         print(f"    ssid:   {cam.ssid or '(unset)'}")
         print(f"    ble:    {cam.ble_address or '(unset)'}")
         print(f"    output: {cam.output_dir}")
     return 0
+
+
+def _cache_identity(client: "CameraClient", cam_name: str) -> None:
+    """Fetch /cmd/info/1 and persist it to meta.json. Best-effort — never raises."""
+    import datetime as _dt
+
+    try:
+        ident = client.identity()
+        if not ident:
+            return
+        meta = config.load_meta()
+        meta[cam_name] = {**ident, "last_seen": _dt.date.today().isoformat()}
+        config.save_meta(meta)
+    except Exception:
+        pass
 
 
 def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
@@ -246,11 +270,17 @@ def cmd_stats(args: argparse.Namespace) -> int:
             print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
             return 1
         print("Camera ready.")
+        _cache_identity(client, args.name)
         s = client.stats()
         sd_pct = round(s.sd_used_kb / s.sd_total_kb * 100) if s.sd_total_kb else 0
         sd_used_gb = s.sd_used_kb / (1024 * 1024)
         sd_total_gb = s.sd_total_kb / (1024 * 1024)
         ext = "  (ext power)" if s.ext_power else ""
+        ident = config.load_meta().get(args.name, {})
+        if ident:
+            model_str = " ".join(filter(None, [ident.get("brand"), ident.get("product")]))
+            ver = ident.get("ver", "")
+            print(f"Model:       {model_str}  {ver}".rstrip())
         print(f"Battery:     {s.battery}%{ext}")
         print(f"Temperature: {s.temperature}°C")
         print(f"SD card:     {sd_used_gb:.1f} / {sd_total_gb:.1f} GB used ({sd_pct}%)")
@@ -505,6 +535,7 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
             _out(f"  {cam.name}: camera did not respond over HTTP — skipping.", err=True)
             return 0, []
         _out("Camera ready.")
+        _cache_identity(client, cam.name)
         _run_health_checks(client, cam, interactive=True)
 
         cam_state = state.setdefault(cam.name, {})
@@ -554,7 +585,7 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                     downloaded_count += 1
                     avg_bytes += f.size
                     avg_elapsed += file_elapsed
-                    parts: list[str] = [f"{done_count}/{len(todo)}"]
+                    parts: list[str] = [f"{downloaded_count}/{truly_new or len(todo)}"]
                     if file_elapsed > 0.01:
                         parts.append(f"{f.size / file_elapsed / 1_000_000:.1f} MB/s")
                     if avg_elapsed > 0.1:
@@ -1291,11 +1322,24 @@ def cmd_prune(args: argparse.Namespace) -> int:
     if cam is None:
         return 1
 
-    try:
-        cutoff = parse_cutoff(args.before)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    cam_backups = config.load_backups().get(args.name, {})
+
+    if args.before is not None:
+        try:
+            cutoff = parse_cutoff(args.before)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    else:
+        watermarks = [cam_backups[m] for m in args.media if m in cam_backups]
+        if not watermarks:
+            print(
+                "Error: no backup watermark found for this camera — run `bushdump backup` first, "
+                "or pass --before DATE explicitly.",
+                file=sys.stderr,
+            )
+            return 1
+        cutoff = parse_cutoff(min(watermarks))
 
     _wake_join(cam)
 
@@ -1305,11 +1349,11 @@ def cmd_prune(args: argparse.Namespace) -> int:
             print("Camera did not respond over HTTP — wrong network?", file=sys.stderr)
             return 1
         print("Camera ready.")
+        _cache_identity(client, args.name)
         print("Listing files...")
         all_files = client.list_all_files()
 
         local = scan_local_dir(cam.output_dir)
-        cam_backups = config.load_backups().get(args.name, {})
 
         print(_ansi("⚠  The following files will be permanently deleted from the SD card if you confirm below.", "1;33"))
 
@@ -1364,20 +1408,43 @@ def cmd_prune(args: argparse.Namespace) -> int:
             f"\nPermanently delete {total_deletable} files ({size_mb:.1f} MB) from "
             f"{args.name}'s SD card — cannot be undone."
         )
-        try:
-            answer = input(f"Type  {token}  to proceed: ")
-        except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
-            return 0
-        if answer.strip() != token:
-            print("Token mismatch — cancelled.")
-            return 0
+
+        confirmed = False
+        while not confirmed:
+            # Send keepalives in background so the camera doesn't sleep while
+            # the user reads the plan and types the confirmation token.
+            stop_keepalive = threading.Event()
+
+            def _keepalive_loop() -> None:
+                while not stop_keepalive.wait(timeout=10):
+                    client.keep_alive()
+
+            ka_thread = threading.Thread(target=_keepalive_loop, daemon=True)
+            ka_thread.start()
+            try:
+                answer = input(f"Type  {token}  to proceed (Ctrl+C to cancel): ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
+                stop_keepalive.set()
+                return 0
+            finally:
+                stop_keepalive.set()
+
+            if answer.strip() == token:
+                confirmed = True
+            else:
+                print(f"Token mismatch — got {answer.strip()!r}, expected {token!r}. Try again.")
 
         deleted = 0
+        last_alive = time.monotonic()
         delete_failed = False
         for v in all_verdicts:
             if not v.deletable:
                 continue
+            now = time.monotonic()
+            if now - last_alive > 10:
+                client.keep_alive()
+                last_alive = now
             try:
                 client.delete(v.file)
                 print(f"deleted {v.file.name}")
@@ -1601,9 +1668,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_prune.add_argument("name", help="camera name (from `bd cameras`)")
     p_prune.add_argument(
         "--before",
-        required=True,
+        default=None,
         metavar="DATE",
-        help="delete files with date before this (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)",
+        help="delete files with date before this (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS); defaults to the backup watermark",
     )
     p_prune.add_argument(
         "--media",

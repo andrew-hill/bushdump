@@ -127,6 +127,9 @@ Poll until `data.status` (or `data.result`) is one of `"done"`, `"finish"`,
   `.error.txt` sidecar). Never call `CameraClient.delete()` from any other path.
   Id-reuse false positives are made vanishingly unlikely by the live
   `date` + `id` + byte-`size` match in `classify_for_prune`.
+  **File-count stats after deletion vary by model**: E6PMB updates `/cmd/info/N`
+  (file count + SD used) only after a sleep/wake cycle; E8 2.0 Pro reflects
+  deletions immediately.
 - `/cmd/format/start` wipes the entire SD card. Do not call without explicit
   user confirmation.
 - `/cmd/resetFact` and `/cmd/reboot` drop the WiFi AP before sending a

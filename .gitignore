@@ -19,6 +19,7 @@ __pycache__/
 config.toml
 state.json
 backups.json
+meta.json
 *.local.toml
 
 # macOS

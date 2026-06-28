@@ -20,6 +20,7 @@ CONFIG_DIR = Path.home() / ".config" / "bushdump"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 STATE_PATH = CONFIG_DIR / "state.json"
 BACKUPS_PATH = CONFIG_DIR / "backups.json"
+META_PATH = CONFIG_DIR / "meta.json"
 
 DEFAULT_OUTPUT_DIR = "~/Pictures/BushDump"
 DEFAULT_PASSWORD = "1234567890"
@@ -165,6 +166,21 @@ def load_backups(path: Path = BACKUPS_PATH) -> dict[str, dict[str, str]]:
 def save_backups(backups: dict[str, dict[str, str]], path: Path = BACKUPS_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(backups, indent=2, sort_keys=True))
+
+
+# --- camera identity cache --------------------------------------------------
+
+
+def load_meta(path: Path = META_PATH) -> dict[str, dict[str, str]]:
+    """Return {camera_name: {brand, product, model, ver, last_seen}}. Empty on first run."""
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
+def save_meta(meta: dict[str, dict[str, str]], path: Path = META_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(meta, indent=2, sort_keys=True))
 
 
 # --- TOML writing (minimal; we only emit one camera section at a time) ------
