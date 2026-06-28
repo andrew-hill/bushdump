@@ -60,6 +60,7 @@ uv run ruff format .                       # format
 - `docs/camera-api.md` — the reverse-engineered camera API reference
 - `docs/camera-models.md` — registry of which models have been confirmed against `camera-api.md`
 - `tools/` — standalone diagnostic scripts (`inspect-ble`, `wake`, `probe-http`) for adding a new model or stepping through the BLE/WiFi/HTTP flow manually; see `tools/README.md`
+- `scratch/` — gitignored scratch space for logs, terminal output, temp notes, code-review output, etc. Everything inside is ignored. Check here for context notes the user may have left.
 
 ## Multi-camera model
 
