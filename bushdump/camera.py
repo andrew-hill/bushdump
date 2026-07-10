@@ -412,6 +412,14 @@ class CameraClient:
             video_count=video_count,
         )
 
+    def identity(self) -> dict[str, str]:
+        """Fetch /cmd/info/1 and return {brand, product, model, ver}. Best-effort; empty on failure."""
+        try:
+            data = self._client.get("/cmd/info/1").json().get("data", {})
+            return {k: str(data[k]) for k in ("brand", "product", "model", "ver") if k in data}
+        except Exception:
+            return {}
+
     def describe(self) -> str:
         """One-line summary for the add-confirm step (best-effort)."""
         label = f"camera at {self.host}"
@@ -469,6 +477,24 @@ class CameraClient:
         """Set camera clock via POST /cmd/setGmtClock. Pass a UTC datetime."""
         payload = when.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
         self._client.post("/cmd/setGmtClock", json={"data": payload})
+
+    def delete(self, file: CameraFile) -> None:
+        """Permanently delete one file: GET /cmd/delete/<id>/<JPG|MP4>.
+
+        Expects {"code": 0, ...}; raises RuntimeError on bad shape, non-zero code,
+        or HTTP error. No retry — a half-done delete must surface, not silently repeat.
+        Callers must have confirmed downloaded + valid + backed-up first.
+        """
+        resp = self._client.get(f"/cmd/delete/{file.id}/{file.kind}")
+        resp.raise_for_status()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Delete failed for {file.name}: non-JSON response: {resp.text[:200]!r}"
+            ) from exc
+        if not isinstance(body, dict) or body.get("code") != 0:
+            raise RuntimeError(f"Delete failed for {file.name}: {body!r}")
 
     def power_off(self) -> None:
         """Turn the camera's WiFi off (saves its battery).

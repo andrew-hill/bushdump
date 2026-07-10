@@ -105,3 +105,41 @@ def test_state_round_trip_nested(tmp_path):
 
 def test_load_state_missing_returns_empty(tmp_path):
     assert config.load_state(tmp_path / "nope.json") == {}
+
+
+def test_backups_round_trip(tmp_path):
+    path = tmp_path / "backups.json"
+    backups = {
+        "east": {"Photo": "2026-05-31 18:00:01", "Video": "2026-05-30 12:00:00"},
+        "west": {"Photo": "2026-04-01 08:30:00"},
+    }
+    config.save_backups(backups, path)
+    assert config.load_backups(path) == backups
+
+
+def test_load_backups_missing_returns_empty(tmp_path):
+    assert config.load_backups(tmp_path / "nope.json") == {}
+
+
+def test_backup_section_target_and_args(tmp_path):
+    cfg_path = _write(
+        tmp_path / "config.toml",
+        '[cameras.east]\nssid = "CAM8Z8_ABC"\n'
+        "\n"
+        '[backup]\ntarget = "nas:/backup/"\nargs = ["--chown=andrew:users"]\nrsync_bin = "/opt/homebrew/bin/rsync"\n',
+    )
+    cfg = config.load_config(cfg_path)
+    assert cfg.backup.target == "nas:/backup/"
+    assert cfg.backup.args == ["--chown=andrew:users"]
+    assert cfg.backup.rsync_bin == "/opt/homebrew/bin/rsync"
+
+
+def test_backup_section_absent_gives_defaults(tmp_path):
+    cfg_path = _write(
+        tmp_path / "config.toml",
+        '[cameras.east]\nssid = "CAM8Z8_ABC"\n',
+    )
+    cfg = config.load_config(cfg_path)
+    assert cfg.backup.target is None
+    assert cfg.backup.args == []
+    assert cfg.backup.rsync_bin == "rsync"

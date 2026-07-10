@@ -19,6 +19,8 @@ from bushdump.camera import DEFAULT_HOST
 CONFIG_DIR = Path.home() / ".config" / "bushdump"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 STATE_PATH = CONFIG_DIR / "state.json"
+BACKUPS_PATH = CONFIG_DIR / "backups.json"
+META_PATH = CONFIG_DIR / "meta.json"
 
 DEFAULT_OUTPUT_DIR = "~/Pictures/BushDump"
 DEFAULT_PASSWORD = "1234567890"
@@ -31,6 +33,14 @@ CONFIG_TEMPLATE = f"""\
 output_dir = "{DEFAULT_OUTPUT_DIR}"   # each camera saves to <output_dir>/<name>/
 password = "{DEFAULT_PASSWORD}"
 camera_host = "{DEFAULT_HOST}"
+
+# Backup settings (used by `bushdump backup`).
+# [backup]
+# # Each camera's local dir is mirrored under target: <target>/<name>/
+# # e.g. ~/Pictures/BushDump/east/ → user@nas:…/backup/east/
+# target = "user@nas:/path/to/backup/"
+# args = ["--chown=user:group"]   # extra rsync flags (optional; not applied to verify)
+# rsync_bin = "/opt/homebrew/bin/rsync"  # override if system rsync is too old (e.g. for --chown)
 
 # Example (delete or edit):
 # [cameras.frontgate]
@@ -51,8 +61,16 @@ class Camera:
 
 
 @dataclass(slots=True)
+class BackupConfig:
+    target: str | None = None
+    args: list[str] = field(default_factory=list)
+    rsync_bin: str = "rsync"
+
+
+@dataclass(slots=True)
 class Config:
     cameras: dict[str, Camera] = field(default_factory=dict)
+    backup: BackupConfig = field(default_factory=BackupConfig)
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -78,7 +96,15 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
             ble_address=section.get("ble_address") or None,
             expect_ext_power=bool(section.get("expect_ext_power", False)),
         )
-    return Config(cameras=cameras)
+
+    backup_data = data.get("backup", {})
+    backup = BackupConfig(
+        target=backup_data.get("target") or None,
+        args=list(backup_data.get("args", [])),
+        rsync_bin=backup_data.get("rsync_bin", "rsync"),
+    )
+
+    return Config(cameras=cameras, backup=backup)
 
 
 def write_config_template(path: Path = CONFIG_PATH) -> bool:
@@ -127,6 +153,34 @@ def load_state(path: Path = STATE_PATH) -> dict[str, dict[str, str]]:
 def save_state(state: dict[str, dict[str, str]], path: Path = STATE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def load_backups(path: Path = BACKUPS_PATH) -> dict[str, dict[str, str]]:
+    """Return {camera_name: {media_type: watermark_date}}. Empty on first run."""
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text())
+    return {str(cam): {str(k): str(v) for k, v in d.items()} for cam, d in raw.items()}
+
+
+def save_backups(backups: dict[str, dict[str, str]], path: Path = BACKUPS_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(backups, indent=2, sort_keys=True))
+
+
+# --- camera identity cache --------------------------------------------------
+
+
+def load_meta(path: Path = META_PATH) -> dict[str, dict[str, str]]:
+    """Return {camera_name: {brand, product, model, ver, last_seen}}. Empty on first run."""
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
+def save_meta(meta: dict[str, dict[str, str]], path: Path = META_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(meta, indent=2, sort_keys=True))
 
 
 # --- TOML writing (minimal; we only emit one camera section at a time) ------

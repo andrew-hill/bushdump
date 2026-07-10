@@ -8,12 +8,36 @@
       validation because libjpeg's error concealment fills in corrupted MCUs with
       plausible-looking repeated rows. Would need to detect large runs of identical
       MCU rows or similar heuristic to catch partial-download / bit-flip corruption.
-- [ ] Add deletion of old files on the SD card. I want to guard this strongly against
-      data loss, e.g. getting the user to specify a date to which they have backed up
-      files (only older ones are deleted). And for confirmation at time of deletion,
-      also check the sizes/dates/IDs match (best verification we can without re-download).
 
 ## Next-visit camera smoke tests
+
+### `bd backup` / `bd prune`
+
+**Backup multi-camera**
+- [ ] `bd backup` with no camera name should back up all configured cameras in
+      sequence (mirrors `bd sync` behaviour). Most common use case.
+- [ ] Design the multi-camera output so per-camera results are clearly separated
+      and a final summary makes any issues easy to spot — individual camera blocks
+      shouldn't scroll past before the user can review them.
+
+**Backup happy path**
+- [ ] Full cycle: `bd sync` → `bd backup` → `bd prune` — confirm each step
+      sees the state left by the prior.  *(needs camera in range)*
+
+**Backup flags**
+- [ ] Failed transfer (kill rsync mid-flight): watermark does NOT advance.  *(needs large transfer in flight to test)*
+
+**Backup edge cases**
+
+**Prune guards**
+- [ ] `bd prune <name> --before <date>` without `--confirm`: correct DELETE/SKIP
+      table printed, camera file count unchanged.
+- [ ] Wrong count in `DELETE <count>` token: rejected.
+- [ ] No backup watermark covering the files to prune: refused.  *(needs camera in range)*
+- [ ] Local size mismatch (local file differs from camera copy): blocks that file.
+- [ ] `.error.txt` sidecar present: blocks pruning that file.
+- [ ] Known-backed-up old file with `--confirm` and correct token: file disappears
+      from `bd ls`, local copy and `state.json` untouched.
 
 ### `bd sync --retry`
 
