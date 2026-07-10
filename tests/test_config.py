@@ -126,7 +126,8 @@ def test_backup_section_target_and_args(tmp_path):
         tmp_path / "config.toml",
         '[cameras.east]\nssid = "CAM8Z8_ABC"\n'
         "\n"
-        '[backup]\ntarget = "nas:/backup/"\nargs = ["--chown=andrew:users"]\nrsync_bin = "/opt/homebrew/bin/rsync"\n',
+        '[backup]\ntarget = "nas:/backup/"\nargs = ["--chown=andrew:users"]\n'
+        'rsync_bin = "/opt/homebrew/bin/rsync"\n',
     )
     cfg = config.load_config(cfg_path)
     assert cfg.backup.target == "nas:/backup/"

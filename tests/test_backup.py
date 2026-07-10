@@ -83,10 +83,7 @@ def test_parse_rsync_pending_also_accepts_gt_prefix():
 
 def test_parse_rsync_pending_ignores_attribute_only():
     # '.' prefix = file data already on server, only attributes differ — not pending
-    output = (
-        "<f+++++++ 20260510T130001_00000001.jpg\n"
-        ".f...p.g. 20260510T130002_00000002.jpg\n"
-    )
+    output = "<f+++++++ 20260510T130001_00000001.jpg\n.f...p.g. 20260510T130002_00000002.jpg\n"
     result = parse_rsync_pending(output)
     assert "20260510T130001_00000001.jpg" in result
     assert "20260510T130002_00000002.jpg" not in result
@@ -104,10 +101,7 @@ def test_parse_rsync_pending_strips_path_prefix():
 
 
 def test_parse_rsync_pending_ignores_deleting_lines():
-    output = (
-        "<f+++++++ 20260510T130001_00000001.jpg\n"
-        "*deleting   20260509T120000_00000001.jpg\n"
-    )
+    output = "<f+++++++ 20260510T130001_00000001.jpg\n*deleting   20260509T120000_00000001.jpg\n"
     result = parse_rsync_pending(output)
     assert "20260510T130001_00000001.jpg" in result
     assert "20260509T120000_00000001.jpg" not in result

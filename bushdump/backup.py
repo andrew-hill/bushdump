@@ -36,7 +36,7 @@ def parse_rsync_pending(dry_run_output: str) -> set[str]:
         space_idx = line.find(" ")
         if space_idx < 2:
             continue
-        path = line[space_idx + 1:]
+        path = line[space_idx + 1 :]
         if path.endswith("/"):
             continue
         result.add(path.rsplit("/", 1)[-1])
@@ -50,7 +50,7 @@ def parse_rsync_extra(dry_run_output: str) -> set[str]:
         line = line.strip()
         if not line.startswith("*deleting"):
             continue
-        path = line[len("*deleting"):].lstrip()
+        path = line[len("*deleting") :].lstrip()
         if path and not path.endswith("/"):
             result.add(path.rsplit("/", 1)[-1])
     return result
@@ -107,10 +107,7 @@ def rsync_has_summary(output: str) -> bool:
     nothing needs transferring. Absence of this line means rsync didn't complete
     (e.g. connection dropped before finishing).
     """
-    for line in output.splitlines():
-        if line.startswith("sent ") and "bytes" in line:
-            return True
-    return False
+    return any(line.startswith("sent ") and "bytes" in line for line in output.splitlines())
 
 
 def parse_rsync_transfer_count(stats_output: str) -> int | None:

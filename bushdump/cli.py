@@ -194,7 +194,7 @@ def cmd_cameras(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cache_identity(client: "CameraClient", cam_name: str) -> None:
+def _cache_identity(client: CameraClient, cam_name: str) -> None:
     """Fetch /cmd/info/1 and persist it to meta.json. Best-effort — never raises."""
     import datetime as _dt
 
@@ -894,7 +894,11 @@ def _backup_one(
     from bushdump.prune import scan_local_dir
 
     _FAIL: dict = {
-        "ok": False, "media": {}, "warnings": [], "pending_by_type": [], "wm_advanced": [],
+        "ok": False,
+        "media": {},
+        "warnings": [],
+        "pending_by_type": [],
+        "wm_advanced": [],
     }
     _KIND = {"Photo": "JPG", "Video": "MP4"}
 
@@ -1039,8 +1043,7 @@ def _backup_one(
             pending_by_type.append(f"{still_pending} {media}")
 
         behind_wm = {
-            n for n in pending_canon
-            if new_wm and (d := date_from_name(n)) and d <= new_wm
+            n for n in pending_canon if new_wm and (d := date_from_name(n)) and d <= new_wm
         }
         if behind_wm:
             warnings.append(
@@ -1048,8 +1051,7 @@ def _backup_one(
                 f" — investigate the files listed above"
             )
         sidecar_behind_wm = {
-            n for n in sidecar_blocked
-            if new_wm and (d := date_from_name(n)) and d <= new_wm
+            n for n in sidecar_blocked if new_wm and (d := date_from_name(n)) and d <= new_wm
         }
         if sidecar_behind_wm:
             warnings.append(
@@ -1058,9 +1060,7 @@ def _backup_one(
             )
         server_extra = media_names_of_kind(extra_names, kind)
         if server_extra:
-            warnings.append(
-                f"{media}: {len(server_extra)} file(s) on server not present locally"
-            )
+            warnings.append(f"{media}: {len(server_extra)} file(s) on server not present locally")
 
         media_results[media] = {
             "local": total_local,
@@ -1075,21 +1075,19 @@ def _backup_one(
             "server_extra_count": len(server_extra),
         }
 
-    all_canonical = (
-        media_names_of_kind(pending_names, "JPG") | media_names_of_kind(pending_names, "MP4")
+    all_canonical = media_names_of_kind(pending_names, "JPG") | media_names_of_kind(
+        pending_names, "MP4"
     )
     if pending_names - all_canonical:
         warnings.append(
             f"{len(pending_names - all_canonical)} non-media file(s) differ from server"
         )
-    all_canonical_extra = (
-        media_names_of_kind(extra_names, "JPG") | media_names_of_kind(extra_names, "MP4")
+    all_canonical_extra = media_names_of_kind(extra_names, "JPG") | media_names_of_kind(
+        extra_names, "MP4"
     )
     extra_noncanon = extra_names - all_canonical_extra
     if extra_noncanon:
-        warnings.append(
-            f"{len(extra_noncanon)} non-media file(s) on server not present locally"
-        )
+        warnings.append(f"{len(extra_noncanon)} non-media file(s) on server not present locally")
 
     if warnings:
         print(f"\n  {len(warnings)} warning(s):")
@@ -1242,17 +1240,21 @@ def _print_backup_summary(
         # Priority: red > yellow-! > yellow-~ > green > blank.
         if mr.get("local", 0) == 0 and mr.get("server_extra_count", 0) == 0:
             return " ", ""
-        if (mr.get("behind_wm_count", 0) > 0
-                or mr.get("sidecar_behind_wm_count", 0) > 0
-                or mr.get("regressed", False)):
+        if (
+            mr.get("behind_wm_count", 0) > 0
+            or mr.get("sidecar_behind_wm_count", 0) > 0
+            or mr.get("regressed", False)
+        ):
             return "✗", "1;31"
         # Files exist on server but not locally — down to one copy.
         if mr.get("server_extra_count", 0) > 0:
             return "!", "1;33"
         # Pending/blocked but watermark is honest.
-        if (mr.get("pending", 0) > 0
-                or mr.get("sidecar_blocked_count", 0) > 0
-                or (mr.get("local", 0) > 0 and mr.get("wm_is_none", False))):
+        if (
+            mr.get("pending", 0) > 0
+            or mr.get("sidecar_blocked_count", 0) > 0
+            or (mr.get("local", 0) > 0 and mr.get("wm_is_none", False))
+        ):
             return "~", "1;33"
         return "✓", "32"
 
@@ -1355,7 +1357,13 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
         local = scan_local_dir(cam.output_dir)
 
-        print(_ansi("⚠  The following files will be permanently deleted from the SD card if you confirm below.", "1;33"))
+        print(
+            _ansi(
+                "⚠  The following files will be permanently deleted from the SD card "
+                "if you confirm below.",
+                "1;33",
+            )
+        )
 
         all_verdicts: list[PruneVerdict] = []
         total_deletable = 0
@@ -1390,9 +1398,14 @@ def cmd_prune(args: argparse.Namespace) -> int:
                     total_skipped += 1
 
         size_mb = total_bytes / 1_000_000
-        date_range_str = f"{min(delete_dates)[:10]} → {max(delete_dates)[:10]}" if delete_dates else "—"
+        date_range_str = (
+            f"{min(delete_dates)[:10]} → {max(delete_dates)[:10]}" if delete_dates else "—"
+        )
         print(f"\n  delete range:  {date_range_str}")
-        print(f"  in range:      {total_deletable} to delete, {total_skipped} skipped, {size_mb:.1f} MB")
+        print(
+            f"  in range:      {total_deletable} to delete, {total_skipped} skipped, "
+            f"{size_mb:.1f} MB"
+        )
         print(f"  outside range: {total_outside_range} not considered (newer than {cutoff[:10]})")
 
         if not sys.stdin.isatty():
@@ -1409,31 +1422,27 @@ def cmd_prune(args: argparse.Namespace) -> int:
             f"{args.name}'s SD card — cannot be undone."
         )
 
-        confirmed = False
-        while not confirmed:
-            # Send keepalives in background so the camera doesn't sleep while
-            # the user reads the plan and types the confirmation token.
-            stop_keepalive = threading.Event()
+        # Send keepalives in background so the camera doesn't sleep while
+        # the user reads the plan and types the confirmation token.
+        stop_keepalive = threading.Event()
 
-            def _keepalive_loop() -> None:
-                while not stop_keepalive.wait(timeout=10):
-                    client.keep_alive()
+        def _keepalive_loop() -> None:
+            while not stop_keepalive.wait(timeout=10):
+                client.keep_alive()
 
-            ka_thread = threading.Thread(target=_keepalive_loop, daemon=True)
-            ka_thread.start()
-            try:
-                answer = input(f"Type  {token}  to proceed (Ctrl+C to cancel): ")
-            except (EOFError, KeyboardInterrupt):
-                print("\nCancelled.")
-                stop_keepalive.set()
-                return 0
-            finally:
-                stop_keepalive.set()
-
-            if answer.strip() == token:
-                confirmed = True
-            else:
+        threading.Thread(target=_keepalive_loop, daemon=True).start()
+        try:
+            while True:
+                try:
+                    answer = input(f"Type  {token}  to proceed (Ctrl+C to cancel): ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\nCancelled.")
+                    return 0
+                if answer.strip() == token:
+                    break
                 print(f"Token mismatch — got {answer.strip()!r}, expected {token!r}. Try again.")
+        finally:
+            stop_keepalive.set()
 
         deleted = 0
         last_alive = time.monotonic()
@@ -1629,7 +1638,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="to",
         default="",
         metavar="BASE",
-        help="rsync base target (overrides config [backup] target); camera name is appended automatically",
+        help="rsync base target (overrides config [backup] target); "
+        "camera name is appended automatically",
     )
     p_backup.add_argument(
         "--checksum",
@@ -1647,7 +1657,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip transfer; show what would be synced without advancing the watermark",
     )
     p_backup.add_argument(
-        "--verify-only", "-v",
+        "--verify-only",
+        "-v",
         action="store_true",
         help="skip transfer; re-verify and advance watermark",
     )
@@ -1670,7 +1681,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--before",
         default=None,
         metavar="DATE",
-        help="delete files with date before this (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS); defaults to the backup watermark",
+        help="delete files with date before this (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS); "
+        "defaults to the backup watermark",
     )
     p_prune.add_argument(
         "--media",
