@@ -9,6 +9,7 @@ from bushdump.health import (
     check_ext_power,
     check_sd,
     check_temperature,
+    clock_sync_action,
     evaluate,
 )
 
@@ -63,6 +64,28 @@ def test_clock_alert():
     w = check_clock(now - timedelta(seconds=70), now)
     assert w is not None
     assert w.level == "alert"
+
+
+# --- clock_sync_action ---
+
+
+def test_clock_sync_action_bands():
+    # Below the 5s warn floor → within tolerance.
+    assert clock_sync_action(2, 900) == "none"
+    # From the floor up to (but not including) the threshold → auto-sync.
+    assert clock_sync_action(5, 900) == "auto"
+    assert clock_sync_action(30, 900) == "auto"
+    assert clock_sync_action(899, 900) == "auto"
+    # At or above the threshold → force a prompt.
+    assert clock_sync_action(900, 900) == "prompt"
+    assert clock_sync_action(1000, 900) == "prompt"
+
+
+def test_clock_sync_action_negative_drift_by_magnitude():
+    # A camera running behind (negative drift) bands by magnitude, same as ahead.
+    assert clock_sync_action(-2, 900) == "none"
+    assert clock_sync_action(-30, 900) == "auto"
+    assert clock_sync_action(-900, 900) == "prompt"
 
 
 # --- check_sd ---

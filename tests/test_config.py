@@ -49,6 +49,20 @@ def test_load_config_per_camera_output_override(tmp_path):
     assert "~" not in str(cam.output_dir)
 
 
+def test_load_config_clock_auto_sync_defaults(tmp_path):
+    cfg_path = _write(tmp_path / "config.toml", '[cameras.cam]\nssid = "S"\n')
+    cfg = config.load_config(cfg_path)
+    assert cfg.clock_auto_sync_secs == config.DEFAULT_CLOCK_AUTO_SYNC_SECS == 900
+
+
+def test_load_config_clock_auto_sync_configured(tmp_path):
+    cfg_path = _write(
+        tmp_path / "config.toml",
+        'clock_auto_sync_secs = 300\n[cameras.cam]\nssid = "S"\n',
+    )
+    assert config.load_config(cfg_path).clock_auto_sync_secs == 300
+
+
 def test_load_config_missing_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         config.load_config(tmp_path / "absent.toml")

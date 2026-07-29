@@ -126,6 +126,12 @@ def _resolve_tz(tz_raw: object) -> tzinfo | None:
     return None
 
 
+def format_gmt_clock(when: datetime) -> str:
+    """Format a UTC datetime for /cmd/setGmtClock, rounded to the nearest second."""
+    rounded = (when.astimezone(UTC) + timedelta(seconds=0.5)).replace(microsecond=0)
+    return rounded.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def parse_info2(data: object) -> tuple[int, int, bool]:
     """Parse /cmd/info/2 → (battery %, temperature °C, ext_power). Best-effort."""
     if not isinstance(data, dict):
@@ -475,7 +481,7 @@ class CameraClient:
 
     def set_clock(self, when: datetime) -> None:
         """Set camera clock via POST /cmd/setGmtClock. Pass a UTC datetime."""
-        payload = when.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        payload = format_gmt_clock(when)
         self._client.post("/cmd/setGmtClock", json={"data": payload})
 
     def delete(self, file: CameraFile) -> None:

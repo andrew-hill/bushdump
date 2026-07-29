@@ -51,6 +51,14 @@
 - [ ] Confirm `bd stats` completes without error even if `/cmd/info/4` returns
       an unexpected shape — clock check should be silently skipped, not fatal.
 
+**Clock-sync bands**
+- [ ] Modest drift (5s ≤ |drift| < `clock_auto_sync_secs`, default 900): `bd sync <name>`
+      auto-syncs silently with a one-line info message, no prompt.
+- [ ] Large drift (≥ threshold): warn + prompt appears; decline it (or let it time out)
+      and confirm the end-of-sync re-warn fires before power-off.
+- [ ] `bd clock <name> --sync`: the set lands within ~1s of laptop time (not your
+      answer-delay behind), confirming the stale-capture + round-not-floor fixes.
+
 Things to confirm on hardware next time each camera is in range.
 Update `docs/camera-models.md` with findings afterwards.
 

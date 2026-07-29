@@ -117,36 +117,49 @@ def _handle_expected_camera_errors(
     return wrapper
 
 
+def _set_camera_clock(client: CameraClient) -> None:
+    """Set the camera clock to the current UTC time and report the residual drift.
+
+    Captures `now()` immediately before the set so no answer-delay lag is baked in.
+    """
+    from bushdump.camera import parse_info4
+
+    client.set_clock(datetime.datetime.now(datetime.UTC))
+    ti = parse_info4(client.time_info())
+    if ti is not None:
+        residual = abs((ti.clock_utc - datetime.datetime.now(datetime.UTC)).total_seconds())
+        _out(f"  Clock set. Residual drift: {residual:.0f}s", err=True)
+    else:
+        _out("  Clock set.", err=True)
+
+
 def _prompt_clock_sync_with_timeout(
     client: CameraClient, drift_secs: float, timeout: float = 5.0
-) -> None:
-    """Offer to sync the camera clock now; auto-No after `timeout` seconds."""
+) -> bool:
+    """Offer to sync the camera clock now; auto-No after `timeout` seconds.
+
+    Returns True if the clock was set, False if declined/timed out/cancelled.
+    """
     import select
 
-    prompt = f"  Set camera clock now? [y/N] (auto-No in {timeout:.0f}s) "
+    direction = "behind" if drift_secs < 0 else "ahead"
+    prompt = (
+        f"  Set camera clock now? (camera {abs(drift_secs):.0f}s {direction}) "
+        f"[y/N] (auto-No in {timeout:.0f}s) "
+    )
     _out(prompt, err=True)
     try:
         if not sys.stderr.isatty() or not select.select([sys.stdin], [], [], timeout)[0]:
             _out("  (timed out — skipping clock sync)", err=True)
-            return
+            return False
         answer = sys.stdin.readline().strip().lower()
     except (EOFError, KeyboardInterrupt):
         _out("\n  (cancelled — skipping clock sync)", err=True)
-        return
+        return False
     if answer != "y":
-        return
-    from datetime import UTC
-
-    now_utc = datetime.datetime.now(UTC)
-    client.set_clock(now_utc)
-    from bushdump.camera import parse_info4
-
-    ti = parse_info4(client.time_info())
-    if ti is not None:
-        residual = abs((ti.clock_utc - datetime.datetime.now(UTC)).total_seconds())
-        _out(f"  Clock set. Residual drift: {residual:.0f}s", err=True)
-    else:
-        _out("  Clock set.", err=True)
+        return False
+    _set_camera_clock(client)
+    return True
 
 
 def _run_health_checks(
@@ -154,7 +167,14 @@ def _run_health_checks(
     cam: config.Camera,
     *,
     interactive: bool,
-) -> None:
+    auto_sync_secs: int = config.DEFAULT_CLOCK_AUTO_SYNC_SECS,
+) -> health.Warning | None:
+    """Run health checks and print warnings, handling clock drift by band.
+
+    Returns the clock Warning if the clock was left out of sync (the ≥threshold
+    prompt was declined or timed out), so the caller can re-warn before power-off.
+    Returns None when the clock was synced, within tolerance, or not interactive.
+    """
     from bushdump import health
 
     stats = client.stats()
@@ -164,13 +184,31 @@ def _run_health_checks(
         time_info,
         expect_ext_power=cam.expect_ext_power,
     )
+    clock_warning = next((w for w in warnings if w.code == "clock_drift"), None)
     for w in warnings:
-        _warn_line(w)
-    if interactive and time_info is not None:
-        clock_warnings = [w for w in warnings if w.code == "clock_drift"]
-        if clock_warnings:
-            drift = (time_info.clock_utc - datetime.datetime.now(datetime.UTC)).total_seconds()
-            _prompt_clock_sync_with_timeout(client, drift)
+        if w.code != "clock_drift":
+            _warn_line(w)
+
+    if clock_warning is None or time_info is None:
+        return None
+
+    if not interactive:
+        _warn_line(clock_warning)
+        return None
+
+    drift = (time_info.clock_utc - datetime.datetime.now(datetime.UTC)).total_seconds()
+    action = health.clock_sync_action(drift, auto_sync_secs)
+    if action == "auto":
+        direction = "behind" if drift < 0 else "ahead"
+        _out(f"  Camera clock was {abs(drift):.0f}s {direction} — synced.", err=True)
+        _set_camera_clock(client)
+        return None
+    if action == "prompt":
+        _warn_line(clock_warning)
+        if _prompt_clock_sync_with_timeout(client, drift):
+            return None
+        return clock_warning
+    return None
 
 
 def cmd_cameras(args: argparse.Namespace) -> int:
@@ -340,11 +378,8 @@ def cmd_clock(args: argparse.Namespace) -> int:
         if not args.sync:
             return 0
 
-        sync_time = datetime.datetime.now(datetime.UTC)
         try:
-            answer = input(
-                f"\nSet camera clock to {sync_time.strftime('%Y-%m-%d %H:%M:%S')} UTC? [y/N] "
-            )
+            answer = input("\nSet camera clock to current UTC now? [y/N] ")
         except (EOFError, KeyboardInterrupt):
             print("\nCancelled.")
             return 0
@@ -352,7 +387,7 @@ def cmd_clock(args: argparse.Namespace) -> int:
             print("Cancelled.")
             return 0
 
-        client.set_clock(sync_time)
+        client.set_clock(datetime.datetime.now(datetime.UTC))
         ti = client.time_info()
         print("\nCamera /cmd/info/4 after sync:")
         print(json.dumps(ti, indent=2) if ti is not None else "  (no JSON response)")
@@ -483,7 +518,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         failed = False
         for cam in cameras:
             try:
-                n, conflicts = _sync_one(cam, state, args)
+                n, conflicts = _sync_one(
+                    cam, state, args, clock_auto_sync_secs=cfg.clock_auto_sync_secs
+                )
                 total += n
                 all_conflicts.extend(conflicts)
             except KeyboardInterrupt:
@@ -518,7 +555,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
         _verbose = False
 
 
-def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tuple[int, list[str]]:
+def _sync_one(
+    cam: config.Camera,
+    state: dict,
+    args: argparse.Namespace,
+    *,
+    clock_auto_sync_secs: int = config.DEFAULT_CLOCK_AUTO_SYNC_SECS,
+) -> tuple[int, list[str]]:
     from bushdump.camera import CameraClient
 
     _out(f"\n=== {cam.name} ===")
@@ -536,7 +579,9 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
             return 0, []
         _out("Camera ready.")
         _cache_identity(client, cam.name)
-        _run_health_checks(client, cam, interactive=True)
+        clock_warning = _run_health_checks(
+            client, cam, interactive=True, auto_sync_secs=clock_auto_sync_secs
+        )
 
         cam_state = state.setdefault(cam.name, {})
         conflicts: list[str] = []
@@ -611,6 +656,10 @@ def _sync_one(cam: config.Camera, state: dict, args: argparse.Namespace) -> tupl
                 # shouldn't re-check this window.
                 cam_state[media] = f.date
                 config.save_state(state)
+
+        if clock_warning is not None:
+            _out("  Clock still out of sync:", err=True)
+            _warn_line(clock_warning)
 
         if not args.keep_awake:
             client.power_off()

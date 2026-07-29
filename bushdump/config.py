@@ -24,6 +24,7 @@ META_PATH = CONFIG_DIR / "meta.json"
 
 DEFAULT_OUTPUT_DIR = "~/Pictures/BushDump"
 DEFAULT_PASSWORD = "1234567890"
+DEFAULT_CLOCK_AUTO_SYNC_SECS = 900
 
 CONFIG_TEMPLATE = f"""\
 # BushDump config — one entry per camera under [cameras.<name>].
@@ -33,6 +34,8 @@ CONFIG_TEMPLATE = f"""\
 output_dir = "{DEFAULT_OUTPUT_DIR}"   # each camera saves to <output_dir>/<name>/
 password = "{DEFAULT_PASSWORD}"
 camera_host = "{DEFAULT_HOST}"
+# Auto-sync the camera clock when drift is below this many seconds; prompt at or above it.
+# clock_auto_sync_secs = {DEFAULT_CLOCK_AUTO_SYNC_SECS}
 
 # Backup settings (used by `bushdump backup`).
 # [backup]
@@ -71,6 +74,7 @@ class BackupConfig:
 class Config:
     cameras: dict[str, Camera] = field(default_factory=dict)
     backup: BackupConfig = field(default_factory=BackupConfig)
+    clock_auto_sync_secs: int = DEFAULT_CLOCK_AUTO_SYNC_SECS
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -104,7 +108,11 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         rsync_bin=backup_data.get("rsync_bin", "rsync"),
     )
 
-    return Config(cameras=cameras, backup=backup)
+    return Config(
+        cameras=cameras,
+        backup=backup,
+        clock_auto_sync_secs=int(data.get("clock_auto_sync_secs", DEFAULT_CLOCK_AUTO_SYNC_SECS)),
+    )
 
 
 def write_config_template(path: Path = CONFIG_PATH) -> bool:

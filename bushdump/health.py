@@ -50,6 +50,21 @@ def check_clock(camera_clock_utc: datetime, now_utc: datetime) -> Warning | None
     return Warning(level=level, code="clock_drift", message=msg)
 
 
+def clock_sync_action(drift_secs: float, auto_sync_secs: int) -> Literal["none", "auto", "prompt"]:
+    """Decide how to handle a measured clock drift, given the auto-sync threshold.
+
+    Bands (by magnitude): below the warn floor → "none" (within tolerance);
+    floor up to `auto_sync_secs` → "auto" (fix silently); at or above it →
+    "prompt" (force a human decision — likely a timezone shift or stopped clock).
+    """
+    abs_drift = abs(drift_secs)
+    if abs_drift < _CLOCK_WARN_SECS:
+        return "none"
+    if abs_drift < auto_sync_secs:
+        return "auto"
+    return "prompt"
+
+
 def check_sd(used_kb: int, total_kb: int) -> Warning | None:
     if total_kb <= 0:
         return None

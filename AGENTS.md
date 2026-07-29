@@ -112,6 +112,16 @@ Location permission; falls back to manual SSID entry otherwise.
   design — keep logic in pure functions so it stays testable.
 - Run `uv run pytest` after every change to touched code.
 
+## Git workflow
+
+- **Only commit or push when explicitly asked.** Never auto-commit.
+- **Housekeeping and small, low-risk feature changes go straight to `main`.**
+- **Branch + PR for the bigger stuff**: architectural changes, large features
+  that need multiple rounds of testing or on-site (hardware) verification, or
+  anything with significant blast radius / risk — so it can go through a more
+  formal review process. PRs merge with merge commits.
+- When in doubt about which bucket a change falls in, ask.
+
 ## ⚠️ Safety rules for agents
 
 - **`CameraClient.delete()` is exposed only via `bushdump prune`** (dry-run

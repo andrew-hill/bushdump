@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from bushdump.camera import (
     CameraClient,
     CameraFile,
+    format_gmt_clock,
     parse_file_page,
     parse_info2,
     parse_info3,
@@ -87,6 +89,26 @@ def test_parse_info3_nominal():
 def test_parse_info3_missing_fields():
     assert parse_info3({"code": 0, "data": {}}) == (0, 0, 0, 0)
     assert parse_info3(None) == (0, 0, 0, 0)
+
+
+# --- format_gmt_clock ---
+
+
+def test_format_gmt_clock_rounds_up():
+    when = datetime(2026, 7, 29, 10, 15, 32, 600_000, tzinfo=UTC)
+    assert format_gmt_clock(when) == "2026-07-29 10:15:33"
+
+
+def test_format_gmt_clock_rounds_down():
+    when = datetime(2026, 7, 29, 10, 15, 32, 400_000, tzinfo=UTC)
+    assert format_gmt_clock(when) == "2026-07-29 10:15:32"
+
+
+def test_format_gmt_clock_converts_to_utc():
+    # UTC+10 aware datetime → converted to UTC before formatting.
+    tz = timezone(timedelta(hours=10))
+    when = datetime(2026, 7, 29, 20, 15, 32, tzinfo=tz)
+    assert format_gmt_clock(when) == "2026-07-29 10:15:32"
 
 
 # --- CameraClient.delete ---
