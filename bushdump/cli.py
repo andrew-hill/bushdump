@@ -946,6 +946,7 @@ def _backup_one(
         verify_cmd.append("-c")
     verify_cmd += [src, dst]
     method = "byte-checked (rsync -c)" if args.checksum else "size+mtime verified"
+    print("")
     print(f"  Verifying ({method}) ...")
     verify_result = subprocess.run(verify_cmd, capture_output=True, text=True)
     if args.verbose and verify_result.stdout.strip():
