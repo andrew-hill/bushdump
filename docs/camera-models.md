@@ -4,8 +4,9 @@ A registry of the camera models BushDump has been verified against, plus
 models referenced by the upstream reverse-engineering sources that *should*
 work but haven't been confirmed first-hand.
 
-See [`camera-api.md`](camera-api.md) for the protocol details. Update this
-file whenever a new camera is verified.
+See [`camera-api.md`](camera-api.md) for the protocol details and
+[`raw-samples.md`](raw-samples.md) for anonymised raw dumps. Update this file
+whenever a new camera is verified.
 
 ## Confirmation legend
 
@@ -26,6 +27,11 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - WPA2: `1234567890` (factory default — `password: -1` in `/cmd/getSetting`
   means "no user override")
 - Firmware seen: `V6.2.115` (MCU `V213`), BLE module `SL_v0.3.2_2022.09.15`
+- BLE module (from GATT Device Information): Silicon Labs BG22 — manufacturer
+  "Shenzhen RF-star Technology Co., Ltd.", hardware `RF_BM_BG22A1A2`, firmware
+  `V0.3.2_2022.09.15` (matches the `SL_v0.3.2_2022.09.15` string above)
+- **System ID (`00002a23`) carries the WiFi MAC** as EUI-64, so the SSID can be
+  derived over BLE without a WiFi scan — see `camera-api.md` "GATT table"
 - BLE wake char: `6e400004-b5a3-f393-e0a9-e50e24dcca9e`, expects `OK\r\n`
 - HTTP confirmed: `/cmd/info/1..5`, `/cmd/getSetting`, `/cmd/getParaSetting`,
   `/cmd/standby/reset`, `/list/detail/forward/0/10`
@@ -47,6 +53,10 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - WPA2: `1234567890` ✅
 - `/cmd/info/1`: `{"brand":"GardePro","product":"E8 2.0 Pro","model":"E8V2P","ver":"V9.2.108 MCU V2.67"}`
 - `/cmd/info/5` hardware: `h/w 9.4.9.2S.2`, BLE module `TL_v1.0.5_2025.01.08`
+- BLE module (from GATT Device Information): Telink — manufacturer "Shenzhen
+  Linkiing Technology Co.,Ltd.", hardware `LK8625_V1.6`, firmware `v1.0.5`
+- **System ID (`00002a23`) is zeroed** (`000000fffe000000`) — unlike the E6PMB,
+  the SSID cannot be derived from BLE on this module
 - BLE wake char: `6e400004-b5a3-f393-e0a9-e50e24dcca9e`, same as E6PMB.
   Confirmed `OK\r\n` reply via `--probe-all` (consistent across two separate
   sessions). The CLI sometimes shows "(no ack)" — this is a 3s notification

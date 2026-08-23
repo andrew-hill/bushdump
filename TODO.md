@@ -78,3 +78,45 @@ Update `docs/camera-models.md` with findings afterwards.
       power (no external solar) — verifies the `voltage`/`battery` fallback
 - [ ] review output of `bd settings` (raw log on file: `bd-settings-norw.log`;
       `/cmd/getParaSetting` shows valid values for each field)
+
+## macOS 26 (Tahoe) SSID redaction
+
+macOS 26 redacts WiFi SSIDs from any process lacking Apple's restricted
+`com.apple.developer.networking.wifi-info` entitlement (needs a provisioning
+profile from a paid developer account; ad-hoc signing it gets the process
+SIGKILLed by AMFI). Location authorization is necessary but **not** sufficient —
+confirmed with `authorizedAlways` plus a live location fix, SSIDs still null.
+`sudo` does not bypass it, and `system_profiler` is redacted too. Not an
+Apple-silicon issue; it's the OS version.
+
+**The workaround**: CoreWLAN still *filters* by name even though it won't
+report one — `scanForNetworksWithName_("G")` returns 2 hits, a bogus name
+returns 0. So we can ask "is this AP present?" without ever reading a name.
+Presence is three-state (present / absent / unknown) because a scan can come
+back `Resource busy` — and unknown must never be read as absent. In practice
+that's rare: hammering scans in a tight loop produced ~50% busy, but real
+polling at 3s intervals across every on-site run produced none at all.
+
+Also unredacted: `networksetup -listpreferredwirelessnetworks` (saved networks,
+no admin needed), the "Could not find network X" error from
+`-setairportnetwork`, WiFi power state, and BLE.
+
+### Code
+
+- [ ] `register` — offer saved networks as a pick-list (camera-likely first),
+      plus join-and-diff to detect a brand-new camera. Live SSID listing can't
+      work under redaction. Where the BLE module programs System ID, derive the
+      SSID from GATT instead (see `docs/camera-api.md`).
+- [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
+      us poll wake state without any WiFi scan. **Writes to the camera**: query
+      forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/
+      ERASE/FORMAT. See `docs/camera-api.md` "The wake is an AT command set".
+
+## iOS app (future project, own spec)
+
+Collect images in the field without carrying the laptop. iOS gets "Access WiFi
+Information" as a normal capability, so the SSID problem largely evaporates
+there. Could be a stepping stone to the laptop, or push straight to the NAS
+using the existing backup logic. Needs a paid Apple developer account (renews
+annually — same expiry trap as entitling the CLI, but here it buys a real
+product rather than working around a permission).
