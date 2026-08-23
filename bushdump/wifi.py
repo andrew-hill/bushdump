@@ -1,10 +1,16 @@
 """WiFi on macOS: list nearby networks (CoreWLAN) and join an AP.
 
-Listing SSIDs uses CoreWLAN, which Apple gates behind Location Services — if the
-permission isn't granted, scans come back empty and the caller falls back to
-manual SSID entry. Joining the camera's AP drops your normal WiFi (the camera AP
-has no internet); we don't auto-restore it — you rejoin your usual network
-yourself when you're done.
+Listing SSIDs uses CoreWLAN, which Apple gates two separate ways. Location
+Services has always been required to *scan*. Since macOS 26 reading a network's
+*name* additionally needs the restricted `com.apple.developer.networking.wifi-info`
+entitlement, so on Tahoe scans succeed and come back nameless no matter what
+Location is set to — see `REDACTED_HINT`. `diagnose_scan` exists to keep those
+apart, and `ssid_present` works under redaction by asking about one name rather
+than reading any.
+
+Joining the camera's AP drops your normal WiFi (the camera AP has no internet);
+we don't auto-restore it — you rejoin your usual network yourself when you're
+done.
 """
 
 from __future__ import annotations
@@ -34,17 +40,23 @@ REDACTED_HINT = (
 )
 
 
-def diagnose_scan(framework: bool, seen: int, named: int) -> str | None:
+def diagnose_scan(framework: bool, seen: int | None, named: int) -> str | None:
     """Explain why a scan came back unusable, or None if it's fine.
 
-    Kept pure so the three-way distinction is testable: the framework is missing,
-    the names are redacted, or there is genuinely nothing in range. Conflating
-    those is what makes a permission gate look like a broken API.
+    Kept pure so the distinctions are testable: the framework is missing, the
+    radio never scanned, the names are redacted, or there is genuinely nothing
+    in range. Conflating those is what makes a permission gate look like a
+    broken API — or a switched-off radio look like empty air.
+
+    `seen` is None when no scan completed at all, which is not the same as a
+    scan that completed and found nothing.
     """
     if not framework:
         return "CoreWLAN unavailable — is the pyobjc WiFi framework installed?"
     if named:
         return None
+    if seen is None:
+        return "Could not scan for WiFi networks — is WiFi switched off?"
     if seen:
         return REDACTED_HINT
     return "No WiFi networks in range."
@@ -78,8 +90,12 @@ def ssid_present(ssid: str) -> bool | None:
         return None
 
 
-def _scan_raw() -> tuple[int, list[str]]:
+def _scan_raw() -> tuple[int | None, list[str]]:
     """Scan once, returning (networks seen, readable SSIDs).
+
+    `networks seen` is None when the scan never ran — no framework, no WiFi
+    interface (radio switched off), or CoreWLAN raised. Zero means it ran and
+    the air really was empty.
 
     Those two disagree under redaction: a perfectly healthy scan comes back with
     plenty of networks carrying valid RSSI/channel/security and not one name.
@@ -91,18 +107,18 @@ def _scan_raw() -> tuple[int, list[str]]:
     try:
         from CoreWLAN import CWWiFiClient
     except Exception:
-        return 0, []
+        return None, []
     try:
         interface = CWWiFiClient.sharedWiFiClient().interface()
         if interface is None:
-            return 0, []
+            return None, []
         interface.scanForNetworksWithName_error_(None, None)
         cached = interface.cachedScanResults()
         if not cached:
             return 0, []
         return len(cached), [n.ssid() for n in cached if n.ssid()]
     except Exception:
-        return 0, []
+        return None, []
 
 
 def saved_ssids() -> list[str]:
@@ -150,13 +166,14 @@ def watch_ssids(
     the busiest scan of the watch itself, not a separate scan that might miss.
     """
     names: set[str] = set()
-    most_seen = 0
+    most_seen: int | None = None
     deadline = time.monotonic() + seconds
     first = True
     while first or time.monotonic() < deadline:
         first = False
         seen, found = _scan_raw()
-        most_seen = max(most_seen, seen)
+        if seen is not None:
+            most_seen = seen if most_seen is None else max(most_seen, seen)
         for ssid in found:
             if ssid not in names:
                 names.add(ssid)

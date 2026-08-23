@@ -129,3 +129,16 @@ def test_diagnose_scan_prefers_framework_problem_over_redaction():
     """A missing framework reports zero networks too — don't call that redaction."""
     problem = diagnose_scan(framework=False, seen=0, named=0)
     assert problem != REDACTED_HINT
+
+
+def test_diagnose_scan_distinguishes_wifi_off_from_empty_air():
+    """`seen=None` means the scan never ran (WiFi off, no hardware, scan threw).
+
+    Reporting that as "nothing in range" is the one answer that's definitely
+    wrong — the whole point of this function is not conflating the cases.
+    """
+    problem = diagnose_scan(framework=True, seen=None, named=0)
+    empty_air = diagnose_scan(framework=True, seen=0, named=0)
+    assert problem is not None
+    assert problem != empty_air
+    assert problem != REDACTED_HINT

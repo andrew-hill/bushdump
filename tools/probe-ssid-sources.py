@@ -88,7 +88,14 @@ def resolve_targets(targets: list[str]) -> list[tuple[str, str]]:
     resolved = []
     for name in targets:
         cam = cameras.get(name)
-        resolved.append((cam.name, cam.ble_address) if cam else (name, name))
+        if cam is None:
+            # Not a configured name — assume it's a bare BLE address.
+            resolved.append((name, name))
+        elif cam.ble_address:
+            resolved.append((cam.name, cam.ble_address))
+        else:
+            # Say so plainly; passing None to bleak just prints "scan failed".
+            print(f"  {cam.name}: no BLE address configured — skipping BLE probe.")
     return resolved
 
 

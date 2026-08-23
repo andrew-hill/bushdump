@@ -262,7 +262,11 @@ def _next_wake_action(ack: bool, presence: bool | None, attempt: int, max_attemp
     camera often wakes without acking. So an ack short-circuits straight to the
     join, and otherwise we lean on AP presence, which on macOS 26 is three-state:
     True/False/None, where None means a rate-limited scan couldn't tell us.
-    Treating None as absence would re-wake a camera that is already up.
+
+    Only True stops the waking; None re-wakes like False does. That is not the
+    "never read None as absent" rule being broken — that rule protects callers
+    who would give up on a live camera. Here the cost of guessing wrong is one
+    extra idempotent wake, so when we can't tell, we wake again.
 
     "proceed" means stop waking and move on to waiting for the AP — not join
     this instant. An ack says the camera accepted the wake, not that we can yet
@@ -301,9 +305,10 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync).
 
     The camera's BLE wake is flaky: it can silently no-op, leaving the AP off so
-    the join never finds the network. We retry wake+join as a unit — re-waking
-    between tries is what clears most transient failures, so each join gets a
-    shorter timeout and we loop rather than waiting out one long join.
+    the join never finds the network. So the *wake* is what we retry — re-waking
+    is cheap and idempotent, and it clears most transient failures. Once we stop
+    waking we wait for the AP and join once, generously: the join itself is not
+    flaky, it just needs the radio to be up.
     """
     from bushdump import wifi
 
