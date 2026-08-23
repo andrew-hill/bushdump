@@ -107,6 +107,14 @@ no admin needed), the "Could not find network X" error from
       plus join-and-diff to detect a brand-new camera. Live SSID listing can't
       work under redaction. Where the BLE module programs System ID, derive the
       SSID from GATT instead (see `docs/camera-api.md`).
+- [ ] `_wake_join` always wakes+joins now. The old "already reachable, skip
+      wake+join" short-circuit probed `camera_host`, which every camera answers
+      on (`192.168.8.1:8080` for all of them), so it could take camera A for
+      camera B and file A's photos under B. Joining by SSID is what actually
+      identifies a camera. If the extra BLE wake grates on site, reorder rather
+      than restore: join first (identity), then probe, and skip the wake when
+      the camera already answers. Measure a *failed* join (camera asleep) first
+      — that's the cost that decides whether it's worth it.
 - [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
       us poll wake state without any WiFi scan. **Writes to the camera**: query
       forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/

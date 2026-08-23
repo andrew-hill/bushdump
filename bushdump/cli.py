@@ -283,24 +283,6 @@ def _next_wake_action(ack: bool, presence: bool | None, attempt: int, max_attemp
     return "proceed"
 
 
-def _camera_reachable(cam: config.Camera) -> bool:
-    """True if the camera already answers HTTP — i.e. we're already on its AP.
-
-    We probe reachability rather than compare SSIDs: macOS 26 redacts SSIDs from
-    any process lacking Apple's `com.apple.developer.networking.wifi-info`
-    entitlement, so the current SSID can't even be read back. Reaching the
-    camera is the thing we actually care about anyway — an SSID match never
-    proved the camera was up.
-    """
-    from bushdump.camera import CameraClient
-
-    try:
-        with CameraClient(cam.camera_host) as client:
-            return client.is_ready()
-    except Exception:
-        return False
-
-
 def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync).
 
@@ -309,12 +291,13 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     is cheap and idempotent, and it clears most transient failures. Once we stop
     waking we wait for the AP and join once, generously: the join itself is not
     flaky, it just needs the radio to be up.
+
+    We always join, even if a camera already answers on `camera_host`. Every
+    camera answers on that same address, so reaching *a* camera never proved it
+    was *this* one — joining by SSID does, because SSIDs carry the WiFi MAC and
+    `networksetup` fails outright when the named network isn't there.
     """
     from bushdump import wifi
-
-    if _camera_reachable(cam):
-        _out(f"Camera already reachable at {cam.camera_host} — skipping wake+join.")
-        return
 
     if not cam.ble_address:
         _out("No BLE address configured — skipping wake (turn WiFi on yourself).")

@@ -192,7 +192,6 @@ def test_sync_warns_on_corrupt_download(tmp_path, capsys):
     mock_cam.output_dir = tmp_path
 
     client = MagicMock()
-    client.is_ready.return_value = True  # already on the AP — _wake_join skips wake+join
     client.wait_until_ready.return_value = True
     client.list_all_files.return_value = [file]
     client.download.return_value = dest
@@ -208,6 +207,7 @@ def test_sync_warns_on_corrupt_download(tmp_path, capsys):
     args.keep_awake = False
 
     with (
+        patch("bushdump.cli._wake_join"),
         patch("bushdump.camera.CameraClient", return_value=client),
         patch("bushdump.config.save_state"),
     ):
@@ -233,7 +233,6 @@ def test_sync_retry_rerequests_sidecar_files(tmp_path, capsys):
     mock_cam.output_dir = tmp_path
 
     client = MagicMock()
-    client.is_ready.return_value = True  # already on the AP — _wake_join skips wake+join
     client.wait_until_ready.return_value = True
     client.list_all_files.return_value = [file]
     client.stats.return_value = _healthy_stats()
@@ -258,6 +257,7 @@ def test_sync_retry_rerequests_sidecar_files(tmp_path, capsys):
     state = {"frontgate": {"Photo": "2026-05-10 14:00:00"}}
 
     with (
+        patch("bushdump.cli._wake_join"),
         patch("bushdump.camera.CameraClient", return_value=client),
         patch("bushdump.config.save_state"),
     ):
