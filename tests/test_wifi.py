@@ -1,5 +1,11 @@
 from bushdump.cli import _format_candidate_row, _is_camera_ble, _mark
-from bushdump.wifi import is_likely_camera_ssid, parse_wifi_interface, rank_ssids
+from bushdump.wifi import (
+    REDACTED_HINT,
+    diagnose_scan,
+    is_likely_camera_ssid,
+    parse_wifi_interface,
+    rank_ssids,
+)
 
 SAMPLE = """\
 Hardware Port: Ethernet
@@ -32,16 +38,16 @@ def test_rank_ssids_dedupes_and_surfaces_cameras_first():
 
 
 def test_rank_ssids_cam8z8_surfaces_first():
-    ssids = ["HomeNet", "CAM8Z8_A4C13896B3B0", "Cafe", "CAM8Z8_385CFB2540D4"]
+    ssids = ["HomeNet", "CAM8Z8_AABBCC445566", "Cafe", "CAM8Z8_AABBCC112233"]
     ranked = rank_ssids(ssids)
-    assert ranked[:2] == ["CAM8Z8_385CFB2540D4", "CAM8Z8_A4C13896B3B0"]
+    assert ranked[:2] == ["CAM8Z8_AABBCC112233", "CAM8Z8_AABBCC445566"]
 
 
 # --- is_likely_camera_ssid ---
 
 
 def test_is_likely_camera_ssid_linkiing():
-    assert is_likely_camera_ssid("CAM8Z8_385CFB2540D4")
+    assert is_likely_camera_ssid("CAM8Z8_AABBCC112233")
 
 
 def test_is_likely_camera_ssid_legacy():
@@ -89,3 +95,37 @@ def test_candidate_row_stays_plain_when_not_tty_or_not_candidate():
     row = "  ◆  CAM8Z8_backyard   abc"
     assert _format_candidate_row(row, True, tty=False) == row
     assert _format_candidate_row(row, False, tty=True) == row
+
+
+# --- macOS 26 SSID redaction ------------------------------------------------
+#
+# Tahoe hides SSIDs from processes without Apple's `wifi-info` entitlement, so a
+# healthy scan returns networks with no names. These cover telling that apart
+# from the framework being absent and from nothing being in range.
+
+
+def test_diagnose_scan_ok_when_names_came_back():
+    assert diagnose_scan(framework=True, seen=12, named=12) is None
+
+
+def test_diagnose_scan_reports_missing_framework():
+    problem = diagnose_scan(framework=False, seen=0, named=0)
+    assert problem is not None
+    assert "CoreWLAN" in problem
+
+
+def test_diagnose_scan_reports_redaction_when_networks_seen_but_unnamed():
+    problem = diagnose_scan(framework=True, seen=46, named=0)
+    assert problem == REDACTED_HINT
+
+
+def test_diagnose_scan_reports_empty_air_when_nothing_seen():
+    problem = diagnose_scan(framework=True, seen=0, named=0)
+    assert problem is not None
+    assert problem != REDACTED_HINT
+
+
+def test_diagnose_scan_prefers_framework_problem_over_redaction():
+    """A missing framework reports zero networks too — don't call that redaction."""
+    problem = diagnose_scan(framework=False, seen=0, named=0)
+    assert problem != REDACTED_HINT

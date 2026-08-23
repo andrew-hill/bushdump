@@ -247,6 +247,56 @@ def _cache_identity(client: CameraClient, cam_name: str) -> None:
         pass
 
 
+# How long to wait for the AP after a silent wake, before re-waking. Detection
+# lags a wake by ~25s — that's macOS scan scheduling as much as radio boot, and
+# the two can't be told apart — so this is deliberately shorter: two attempts
+# cover the observed lag, and a camera that woke without acking is caught on the
+# first pass instead of the third.
+_AP_BOOT_CHECK_SECS = 15.0
+
+
+def _next_wake_action(ack: bool, presence: bool | None, attempt: int, max_attempts: int) -> str:
+    """Decide what to do after one BLE wake: "proceed" or "rewake".
+
+    The ack is reliable when it arrives and meaningless when it doesn't — the
+    camera often wakes without acking. So an ack short-circuits straight to the
+    join, and otherwise we lean on AP presence, which on macOS 26 is three-state:
+    True/False/None, where None means a rate-limited scan couldn't tell us.
+    Treating None as absence would re-wake a camera that is already up.
+
+    "proceed" means stop waking and move on to waiting for the AP — not join
+    this instant. An ack says the camera accepted the wake, not that we can yet
+    see the AP: detection lagged the ack by ~25s on an E6PMB (macOS scan
+    scheduling as much as radio boot — we can't separate them).
+
+    Out of attempts we proceed anyway: `networksetup` reports "Could not find
+    network" when the AP really is down, so the join is our second oracle.
+    """
+    if ack or presence is True:
+        return "proceed"
+    if attempt < max_attempts:
+        return "rewake"
+    return "proceed"
+
+
+def _camera_reachable(cam: config.Camera) -> bool:
+    """True if the camera already answers HTTP — i.e. we're already on its AP.
+
+    We probe reachability rather than compare SSIDs: macOS 26 redacts SSIDs from
+    any process lacking Apple's `com.apple.developer.networking.wifi-info`
+    entitlement, so the current SSID can't even be read back. Reaching the
+    camera is the thing we actually care about anyway — an SSID match never
+    proved the camera was up.
+    """
+    from bushdump.camera import CameraClient
+
+    try:
+        with CameraClient(cam.camera_host) as client:
+            return client.is_ready()
+    except Exception:
+        return False
+
+
 def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync).
 
@@ -257,8 +307,8 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     """
     from bushdump import wifi
 
-    if cam.ssid and wifi.current_ssid() == cam.ssid:
-        _out(f"Already on '{cam.ssid}' — skipping wake+join.")
+    if _camera_reachable(cam):
+        _out(f"Camera already reachable at {cam.camera_host} — skipping wake+join.")
         return
 
     if not cam.ble_address:
@@ -267,19 +317,26 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
         wifi.join(cam.ssid, cam.password)
         return
 
-    last_err: Exception | None = None
     for attempt in range(1, attempts + 1):
-        _wake_and_report(cam.ble_address, cam.name)
-        _out(f"Joining WiFi '{cam.ssid}'...")
-        try:
-            wifi.join(cam.ssid, cam.password, timeout=15.0)
-            return
-        except RuntimeError as e:
-            last_err = e
-            if attempt < attempts:
-                _out(f"  (attempt {attempt}/{attempts} couldn't reach the AP — re-waking)")
-    assert last_err is not None
-    raise last_err
+        ack = _wake_and_report(cam.ble_address, cam.name)
+        # An ack settles it — don't spend time scanning for what we know is coming.
+        # Without one, give the radio a chance before deciding the wake failed:
+        # checking instantly always reads "absent" during that lag, which burns
+        # every wake attempt before we ever wait properly.
+        presence = None if ack else wifi.wait_for_ssid(cam.ssid, timeout=_AP_BOOT_CHECK_SECS)
+        if _next_wake_action(ack, presence, attempt, attempts) == "proceed":
+            break
+        _out(f"  (attempt {attempt}/{attempts}: AP not up yet — re-waking)")
+
+    _out(f"Waiting for AP '{cam.ssid}'...")
+    found = wifi.wait_for_ssid(cam.ssid)
+    if found is False:
+        _out("  AP never appeared — trying the join anyway.")
+    elif found is None:
+        _out("  Couldn't tell (macOS hides network names) — trying the join anyway.")
+
+    _out(f"Joining WiFi '{cam.ssid}'...")
+    wifi.join(cam.ssid, cam.password, timeout=45.0)
 
 
 def _resolve_camera(name: str) -> config.Camera | None:
@@ -743,13 +800,12 @@ def cmd_ble(args: argparse.Namespace) -> int:
 def cmd_wifi(args: argparse.Namespace) -> int:
     from bushdump import wifi
 
-    if not wifi.corewlan_available():
-        print("WiFi scan unavailable — Location permission off?", file=sys.stderr)
-        return 1
     timeout = args.timeout if args.timeout is not None else 8.0
     print(f"Watching for WiFi networks for {timeout:.0f}s...")
-    if not wifi.watch_ssids(timeout, _print_wifi_found):
-        print("  (none found)")
+    ssids, problem = wifi.watch_ssids(timeout, _print_wifi_found)
+    if not ssids:
+        print(f"  {problem or 'No WiFi networks found.'}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -765,15 +821,25 @@ def cmd_wake(args: argparse.Namespace) -> int:
     _wake_and_report(cam.ble_address, cam.name)
     if cam.ssid and wifi.corewlan_available():
         print(f"Waiting for AP '{cam.ssid}' to appear...")
-        if wifi.wait_for_ssid(cam.ssid, 20.0):
+        found = wifi.wait_for_ssid(cam.ssid)
+        if found is True:
             print(f"AP '{cam.ssid}' is up.")
+        elif found is False:
+            print(f"AP '{cam.ssid}' did not appear — try waking again.")
         else:
-            print(f"AP '{cam.ssid}' did not appear within 20s.")
+            # Never spin here: this is what hung at site before.
+            print(f"Couldn't tell whether '{cam.ssid}' is up — macOS hides network names.")
+            print("Try joining it from the WiFi menu, or run `bushdump sync --manual-wifi`.")
     return 0
 
 
-def _wake_and_report(address: str, label: str) -> None:
-    """Wake the camera by address, printing the camera's ack on success."""
+def _wake_and_report(address: str, label: str) -> bool:
+    """Wake the camera by address, printing its ack. True if the ack arrived.
+
+    The ack is one-directional evidence: when it comes back the camera really
+    did accept the wake, but silence proves nothing — cameras frequently wake
+    without acking. Callers must not read False as "still asleep".
+    """
     from bleak.exc import BleakBluetoothNotAvailableError
 
     from bushdump import ble
@@ -783,18 +849,19 @@ def _wake_and_report(address: str, label: str) -> None:
         reply = asyncio.run(ble.wake_wifi(address))
     except BleakBluetoothNotAvailableError:
         _out("  (Bluetooth unavailable — check macOS Privacy & Security settings.)")
-        return
+        return False
     except Exception as e:
         _out(f"  (BLE wake failed: {e})")
-        return
+        return False
     if reply is None:
         _out("  (no ack from camera — WiFi may still be coming up)")
-        return
+        return False
     try:
         text = reply.decode("utf-8").strip()
     except UnicodeDecodeError:
         text = reply.hex()
     _out(f"  camera ack: {text!r}")
+    return True
 
 
 def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
@@ -833,13 +900,9 @@ def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
 def _pick_ssid(timeout: float) -> str | None:
     from bushdump import wifi
 
-    if not wifi.corewlan_available():
-        print("\nWiFi scanning unavailable (Location permission off?).")
-        return input("Enter the camera's WiFi SSID manually: ").strip() or None
-
     while True:
         print(f"\nWatching for WiFi networks for {timeout:.0f}s (the AP can take a few seconds)...")
-        ssids = wifi.watch_ssids(timeout, _print_wifi_found)
+        ssids, problem = wifi.watch_ssids(timeout, _print_wifi_found)
         if ssids:
             print("\nNetworks found:")
             for i, ssid in enumerate(ssids):
@@ -847,6 +910,8 @@ def _pick_ssid(timeout: float) -> str | None:
                 sym = (_mark(True) + "  ") if is_cam else "   "
                 row = f"  {f'[{i}]':<4}  {sym}{ssid}"
                 print(_format_candidate_row(row, is_cam))
+        elif problem:
+            print(f"  {problem}")
         prefix = "Pick a number, " if ssids else ""
         raw = input(f"{prefix}[r] watch again, [m] enter manually, blank to cancel: ")
         choice = raw.strip().lower()

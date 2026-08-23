@@ -26,29 +26,102 @@ def corewlan_available() -> bool:
         return False
 
 
-def _scan_once() -> list[str]:
-    """List nearby SSIDs. Calls CoreWLAN's active scan when it'll fire, but
-    also reads `cachedScanResults` — macOS rate-limits explicit scans so the
-    cache (kept fresh by the OS itself) is the more reliable source when a
-    new network has just come up.
+REDACTED_HINT = (
+    "macOS is hiding WiFi network names from this process. Since macOS 26 that "
+    "needs Apple's `com.apple.developer.networking.wifi-info` entitlement, which "
+    "requires a provisioning profile we don't have — Location permission alone is "
+    "not enough. Join the AP from the macOS WiFi menu and enter the SSID manually."
+)
+
+
+def diagnose_scan(framework: bool, seen: int, named: int) -> str | None:
+    """Explain why a scan came back unusable, or None if it's fine.
+
+    Kept pure so the three-way distinction is testable: the framework is missing,
+    the names are redacted, or there is genuinely nothing in range. Conflating
+    those is what makes a permission gate look like a broken API.
+    """
+    if not framework:
+        return "CoreWLAN unavailable — is the pyobjc WiFi framework installed?"
+    if named:
+        return None
+    if seen:
+        return REDACTED_HINT
+    return "No WiFi networks in range."
+
+
+def ssid_present(ssid: str) -> bool | None:
+    """Is an AP with exactly this name in range? None means "couldn't tell".
+
+    macOS 26 won't report a network's name, but CoreWLAN still *filters* by one:
+    scanning for a specific SSID returns the matching networks (names blanked)
+    and nothing at all for a name that isn't there. So a known AP can be
+    confirmed without ever reading a name.
+
+    Scans are rate-limited hard — roughly half come back `Resource busy` even
+    seconds apart — so a scan we couldn't complete returns None, never False.
+    Treating None as absence would re-wake a camera that is already up.
     """
     try:
         from CoreWLAN import CWWiFiClient
     except Exception:
-        return []
+        return None
     try:
         interface = CWWiFiClient.sharedWiFiClient().interface()
         if interface is None:
-            return []
-        # Best-effort active scan; macOS may throttle this to once every ~30s
-        # but a successful one populates the cache.
+            return None
+        networks, err = interface.scanForNetworksWithName_error_(ssid, None)
+        if err is not None:
+            return None
+        return bool(networks)
+    except Exception:
+        return None
+
+
+def _scan_raw() -> tuple[int, list[str]]:
+    """Scan once, returning (networks seen, readable SSIDs).
+
+    Those two disagree under redaction: a perfectly healthy scan comes back with
+    plenty of networks carrying valid RSSI/channel/security and not one name.
+
+    Fires a best-effort active scan (macOS may throttle it to ~once every 30s)
+    but reads `cachedScanResults` — the OS keeps the cache fresh itself, so it
+    is the more reliable source when a new network has just come up.
+    """
+    try:
+        from CoreWLAN import CWWiFiClient
+    except Exception:
+        return 0, []
+    try:
+        interface = CWWiFiClient.sharedWiFiClient().interface()
+        if interface is None:
+            return 0, []
         interface.scanForNetworksWithName_error_(None, None)
         cached = interface.cachedScanResults()
         if not cached:
-            return []
-        return [n.ssid() for n in cached if n.ssid()]
+            return 0, []
+        return len(cached), [n.ssid() for n in cached if n.ssid()]
+    except Exception:
+        return 0, []
+
+
+def saved_ssids() -> list[str]:
+    """SSIDs macOS has saved for this interface.
+
+    Not a scan — these are remembered networks, in range or not. But
+    `networksetup` does not redact them, so a camera you have joined before is
+    still nameable on macOS 26. Empty if the lookup fails.
+    """
+    try:
+        iface = find_wifi_interface()
+        out = subprocess.run(
+            ["networksetup", "-listpreferredwirelessnetworks", iface],
+            capture_output=True,
+            text=True,
+        ).stdout
     except Exception:
         return []
+    return rank_ssids([ln.strip() for ln in out.splitlines()[1:] if ln.strip()])
 
 
 _CAMERA_SSID_HINTS = ("cam8z8", "trail cam")
@@ -65,40 +138,57 @@ def rank_ssids(ssids: list[str]) -> list[str]:
     return sorted(unique, key=lambda s: (not is_likely_camera_ssid(s), s.lower()))
 
 
-def scan_ssids() -> list[str]:
-    """One CoreWLAN scan, ranked. Empty if scanning is unavailable."""
-    return rank_ssids(_scan_once())
-
-
 def watch_ssids(
     seconds: float = 8.0,
     on_found: Callable[[str], None] | None = None,
-) -> list[str]:
+) -> tuple[list[str], str | None]:
     """Repeatedly scan for `seconds`, calling `on_found(ssid)` as each new network
-    appears (the camera AP can take a few seconds to come up). Returns ranked SSIDs.
+    appears (the camera AP can take a few seconds to come up).
+
+    Returns (ranked SSIDs, problem). `problem` explains an empty list — missing
+    framework, macOS 26 name redaction, or genuinely empty air — diagnosed from
+    the busiest scan of the watch itself, not a separate scan that might miss.
     """
-    seen: set[str] = set()
+    names: set[str] = set()
+    most_seen = 0
     deadline = time.monotonic() + seconds
     first = True
     while first or time.monotonic() < deadline:
         first = False
-        for ssid in _scan_once():
-            if ssid not in seen:
-                seen.add(ssid)
+        seen, found = _scan_raw()
+        most_seen = max(most_seen, seen)
+        for ssid in found:
+            if ssid not in names:
+                names.add(ssid)
                 if on_found is not None:
                     on_found(ssid)
         time.sleep(0.5)
-    return rank_ssids(list(seen))
+    ranked = rank_ssids(list(names))
+    return ranked, diagnose_scan(corewlan_available(), most_seen, len(ranked))
 
 
-def wait_for_ssid(ssid: str, timeout: float = 20.0) -> bool:
-    """Poll CoreWLAN until `ssid` appears or `timeout` expires. Returns True if found."""
+def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bool | None:
+    """Poll until `ssid` is in range. True / False / None ("couldn't tell").
+
+    The old version listed every SSID and looked for a match, which on macOS 26
+    never matched anything — that's what made `bushdump wake` hang forever at
+    site. This asks about one name instead, which still works under redaction.
+
+    Timeout defaults generously: even after a camera acks its BLE wake, the AP
+    took ~25s to become *detectable* — part radio boot, part macOS scan
+    scheduling, and the two can't be told apart from here.
+    """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if ssid in _scan_once():
+    saw_unknown = False
+    while True:
+        present = ssid_present(ssid)
+        if present is True:
             return True
-        time.sleep(0.5)
-    return False
+        if present is None:
+            saw_unknown = True
+        if time.monotonic() >= deadline:
+            return None if saw_unknown else False
+        time.sleep(interval)
 
 
 # --- joining / leaving an AP (networksetup) --------------------------------
@@ -127,24 +217,6 @@ def find_wifi_interface() -> str:
     if iface is None:
         raise RuntimeError("Could not find a Wi-Fi interface via networksetup")
     return iface
-
-
-def current_ssid(interface: str | None = None) -> str | None:
-    """Return the SSID the machine is currently connected to, or None."""
-    try:
-        iface = interface or find_wifi_interface()
-        result = subprocess.run(
-            ["networksetup", "-getairportnetwork", iface],
-            capture_output=True,
-            text=True,
-        )
-        line = result.stdout.strip()
-        prefix = "Current Wi-Fi Network: "
-        if line.startswith(prefix):
-            return line[len(prefix) :]
-    except Exception:
-        pass
-    return None
 
 
 def join(
