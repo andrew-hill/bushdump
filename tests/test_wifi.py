@@ -1,10 +1,15 @@
+from unittest.mock import patch
+
 from bushdump.cli import _format_candidate_row, _is_camera_ble, _mark
 from bushdump.wifi import (
     REDACTED_HINT,
+    _seen_from_scan,
     diagnose_scan,
     is_likely_camera_ssid,
+    join_succeeded,
     parse_wifi_interface,
     rank_ssids,
+    wait_for_ssid,
 )
 
 SAMPLE = """\
@@ -142,3 +147,115 @@ def test_diagnose_scan_distinguishes_wifi_off_from_empty_air():
     assert problem is not None
     assert problem != empty_air
     assert problem != REDACTED_HINT
+
+
+# --- _seen_from_scan: the three-state `seen` diagnose_scan depends on ---
+#
+# diagnose_scan has always handled `seen is None`, but nothing ever produced it:
+# a switched-off radio still returns a live CWInterface, so an empty scan came
+# back as 0 and `bushdump wifi` answered "No WiFi networks in range." with WiFi
+# off. These pin the mapping that feeds it.
+
+
+def test_seen_from_scan_radio_off_is_unknown_not_empty():
+    assert _seen_from_scan(powered=False, scan_failed=False, cached=0) is None
+
+
+def test_seen_from_scan_radio_off_ignores_a_stale_cache():
+    # Results may linger from before the radio went down; we still never scanned.
+    assert _seen_from_scan(powered=False, scan_failed=False, cached=12) is None
+
+
+def test_seen_from_scan_empty_air_is_zero_not_unknown():
+    assert _seen_from_scan(powered=True, scan_failed=False, cached=0) == 0
+
+
+def test_seen_from_scan_failed_scan_with_nothing_cached_is_unknown():
+    assert _seen_from_scan(powered=True, scan_failed=True, cached=0) is None
+
+
+def test_seen_from_scan_failed_scan_still_counts_a_populated_cache():
+    # A throttled active scan is fine as long as the OS cache has something —
+    # that cache is what makes redaction detectable at all.
+    assert _seen_from_scan(powered=True, scan_failed=True, cached=46) == 46
+
+
+def test_seen_from_scan_feeds_diagnose_scan_the_wifi_off_message():
+    seen = _seen_from_scan(powered=False, scan_failed=False, cached=0)
+    problem = diagnose_scan(framework=True, seen=seen, named=0)
+    assert problem is not None
+    assert "switched off" in problem
+    assert "in range" not in problem
+
+
+# --- join_succeeded: networksetup reports failure on stdout and exits 0 ---
+
+
+def test_join_succeeded_on_clean_silent_exit():
+    assert join_succeeded(0, "")
+
+
+def test_join_succeeded_false_when_network_missing_despite_exit_zero():
+    # The exact shape seen when the camera AP is down — exit 0, error on stdout.
+    assert not join_succeeded(0, "Could not find network CAM8Z8_AABBCC112233.\n")
+
+
+def test_join_succeeded_false_on_nonzero_exit():
+    assert not join_succeeded(1, "")
+
+
+def test_join_succeeded_ignores_trailing_whitespace():
+    assert join_succeeded(0, "   \n")
+
+
+# --- wait_for_ssid: unknowns are the common case, not the verdict ---
+#
+# Measured on macOS 26 at the real 3s interval: a genuine scan takes ~7s and
+# answers, then the next ~3 polls come back `Resource busy`. So a window that
+# reaches a definite answer will almost always contain unknowns too. Treating
+# any unknown as the verdict threw those answers away.
+
+
+class _FakeClock:
+    """Stands in for the `time` module so polling loops run instantly."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _wait(samples: list[bool | None], interval: float = 3.0) -> bool | None:
+    """Run wait_for_ssid over exactly `samples` polls, with the clock faked out."""
+    with (
+        patch("bushdump.wifi.time", _FakeClock()),
+        patch("bushdump.wifi.ssid_present", side_effect=samples),
+    ):
+        return wait_for_ssid(
+            "CAM8Z8_AABBCC112233",
+            timeout=interval * (len(samples) - 1),
+            interval=interval,
+        )
+
+
+def test_wait_for_ssid_trusts_a_definite_absence_amid_throttled_scans():
+    # The real observed shape: answer, three throttled, answer, three throttled.
+    samples = [False, None, None, None, False, None, None, None, False]
+    assert _wait(samples) is False
+
+
+def test_wait_for_ssid_reports_unknown_only_when_nothing_ever_answered():
+    assert _wait([None] * 12) is None
+
+
+def test_wait_for_ssid_returns_true_as_soon_as_the_ap_appears():
+    # Must not keep polling once it knows — the wake is done.
+    assert _wait([None, None, True]) is True
+
+
+def test_wait_for_ssid_absence_survives_a_trailing_run_of_unknowns():
+    assert _wait([None, False, None, None, None, None]) is False

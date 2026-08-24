@@ -788,13 +788,20 @@ def cmd_ble(args: argparse.Namespace) -> int:
 def cmd_wifi(args: argparse.Namespace) -> int:
     from bushdump import wifi
 
+    # Bail before the watch window: without the framework every iteration would
+    # re-fail the same import for `timeout` seconds before saying so.
+    if not wifi.corewlan_available():
+        print(wifi.diagnose_scan(framework=False, seen=None, named=0), file=sys.stderr)
+        return 1
+
     timeout = args.timeout if args.timeout is not None else 8.0
     print(f"Watching for WiFi networks for {timeout:.0f}s...")
-    ssids, problem = wifi.watch_ssids(timeout, _print_wifi_found)
-    if not ssids:
-        print(f"  {problem or 'No WiFi networks found.'}", file=sys.stderr)
-        return 1
-    return 0
+    outcome = wifi.watch_ssids(timeout, _print_wifi_found)
+    if outcome.problem:
+        print(f"  {outcome.problem}", file=sys.stderr)
+    # An empty list is an answer, not a failure: on macOS 26 the names are
+    # redacted and it is the permanent state. Only a scan that never ran fails.
+    return 0 if outcome.scanned else 1
 
 
 def cmd_wake(args: argparse.Namespace) -> int:
@@ -890,7 +897,8 @@ def _pick_ssid(timeout: float) -> str | None:
 
     while True:
         print(f"\nWatching for WiFi networks for {timeout:.0f}s (the AP can take a few seconds)...")
-        ssids, problem = wifi.watch_ssids(timeout, _print_wifi_found)
+        outcome = wifi.watch_ssids(timeout, _print_wifi_found)
+        ssids, problem = outcome.ssids, outcome.problem
         if ssids:
             print("\nNetworks found:")
             for i, ssid in enumerate(ssids):

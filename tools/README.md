@@ -22,7 +22,7 @@ top-level `bushdump` CLI, not these tools.
 
 ## The flow
 
-There are three stages, and one tool per stage. Each works for both the
+The core flow has three stages, and one tool per stage. Each works for both the
 Linkiing/Telink GardePro platform (the supported one) and the legacy
 GardePro/Dsoon OEM (no longer supported by BushDump, but the diagnostic
 still works).
@@ -66,7 +66,10 @@ uv run python tools/wake.py <ble-address> --probe-all # blanket probe
 ```
 
 For Linkiing cameras you should see `<- 'OK\r\n'` on the same characteristic
-the wake was written to. The AP comes up 1–2 seconds later.
+the wake was written to. The radio may be up a second or two later, but on
+macOS you generally can't *detect* the AP for ~25s — see "AP detection delay"
+in [`../docs/camera-api.md`](../docs/camera-api.md). Don't read an early
+negative as "the wake failed".
 
 Then join the AP from your OS WiFi menu using the WPA2 default for the
 platform (Linkiing: `1234567890`, legacy: `12345678`), or whatever password
@@ -114,6 +117,46 @@ classifies it as unknown), the next step is capturing the manufacturer's
 official app talking to the camera — usually an Android HCI snoop log
 inspected in Wireshark — and figuring out the wake bytes from there. That's
 out of scope for this tool suite.
+
+## macOS 26 (Tahoe) probes
+
+Two extra tools for the SSID-redaction problem: macOS 26 hides network names
+from every scanning API, so the usual "find the camera's AP in a list" approach
+stopped working. See the macOS 26 section of [`../TODO.md`](../TODO.md) for the
+background.
+
+### `probe-ssid-sources.py` — find the SSID without a scan
+
+Dumps every readable GATT characteristic and the camera's HTTP settings/info
+endpoints, hunting for the WiFi MAC or a self-reported SSID (the SSID is
+`CAM8Z8_<wifi-mac-hex>`, so the MAC is as good as the name). GATT is dumped
+both before and after the wake, since the MAC may only show up once the radio
+is on — the diff between the two is itself a clue.
+
+```bash
+uv run python tools/probe-ssid-sources.py              # every configured camera
+uv run python tools/probe-ssid-sources.py --ble-only   # skip the WiFi part
+uv run python tools/probe-ssid-sources.py --http-only  # already on an AP
+```
+
+Anything MAC- or SSID-shaped is flagged `<-- LOOK`. Writes a timestamped log to
+`scratch/`. The only thing written to the camera is the standard BLE wake.
+
+### `probe-wifi-join.py` — step through wake → detect → join
+
+Runs the full chain one step at a time and stops at the first hard failure, so
+a partial run still tells you which step broke: whether the BLE ack arrives,
+whether `ssid_present()` detects the AP by name, and whether `networksetup`
+actually joins.
+
+```bash
+uv run python tools/probe-wifi-join.py <camera-name>
+uv run python tools/probe-wifi-join.py <camera-name> --poll-seconds 45
+```
+
+It **will** join the camera's AP, dropping your normal WiFi — same as `bushdump
+sync`. Nothing is downloaded and nothing on the camera is modified. Writes a
+timestamped log to `scratch/`.
 
 ## `validate-files.py` — validate already-downloaded media
 

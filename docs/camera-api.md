@@ -46,6 +46,29 @@ the strength of one. Poll, and let the join attempt be the real arbiter.
 scan cache — e.g. attempt `networksetup -setairportnetwork` immediately after the
 ack and time how long until it associates. Not yet done.
 
+### Directed-scan throttling — expect unknowns between real answers
+
+Measured off-site at bushdump's own 3s poll interval (macOS 26, 2026-08-24),
+scanning for a *configured camera's* SSID while that camera was out of range:
+
+| poll | in-call | result |
+|------|---------|--------|
+| 1 | ~7s | definite `False` |
+| 2–4 | ~0s | `Resource busy` (`NSPOSIXErrorDomain` 16) |
+| 5 | ~7s | definite `False` |
+| 6–8 | ~0s | `Resource busy` |
+
+**A real scan takes ~7s and answers; the next ~3 polls are throttled and answer
+nothing.** Roughly two thirds of polls come back unknown, so a caller that reads
+a run of unknowns as a verdict will be wrong most of the time. Poll through them
+and keep the last definite answer.
+
+**Do not benchmark this with a made-up SSID.** A name macOS considers
+implausible returns instantly from cache without triggering a radio scan, and so
+never throttles — 99/99 clean over 300s in that configuration, which looks like
+"throttling isn't real" and is purely an artefact of the name. Only a scan for a
+name macOS will actually go looking for exercises the rate limiter.
+
 ### The ack is one-directional evidence
 
 `OK\r\n` means the camera accepted the wake. **Silence means nothing.** An

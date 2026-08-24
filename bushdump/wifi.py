@@ -18,6 +18,7 @@ from __future__ import annotations
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 # --- listing networks (CoreWLAN) -------------------------------------------
 
@@ -70,9 +71,17 @@ def ssid_present(ssid: str) -> bool | None:
     and nothing at all for a name that isn't there. So a known AP can be
     confirmed without ever reading a name.
 
-    Scans are rate-limited hard — roughly half come back `Resource busy` even
-    seconds apart — so a scan we couldn't complete returns None, never False.
-    Treating None as absence would re-wake a camera that is already up.
+    Scans are rate-limited hard, so a scan we couldn't complete returns None,
+    never False. Treating None as absence would re-wake a camera that is
+    already up.
+
+    Measured at bushdump's own 3s poll interval (macOS 26, 2026-08-24): a real
+    scan takes ~7s and answers definitely, then the next ~3 calls come back
+    `Resource busy` instantly, and the cycle repeats — about two thirds unknown
+    overall. Asking about a name macOS considers implausible is *not*
+    representative: those return instantly from cache without ever scanning, and
+    never throttle. So callers must expect unknowns interleaved with real
+    answers, and must not conclude anything from a run of them.
     """
     try:
         from CoreWLAN import CWWiFiClient
@@ -80,7 +89,10 @@ def ssid_present(ssid: str) -> bool | None:
         return None
     try:
         interface = CWWiFiClient.sharedWiFiClient().interface()
-        if interface is None:
+        # A switched-off radio still hands back a live CWInterface — power is a
+        # property of it, not its absence — so ask before reading anything into
+        # an empty result.
+        if interface is None or not interface.powerOn():
             return None
         networks, err = interface.scanForNetworksWithName_error_(ssid, None)
         if err is not None:
@@ -90,12 +102,28 @@ def ssid_present(ssid: str) -> bool | None:
         return None
 
 
+def _seen_from_scan(powered: bool, scan_failed: bool, cached: int) -> int | None:
+    """Turn one raw CoreWLAN scan into `diagnose_scan`'s three-state `seen`.
+
+    None means no scan happened: the radio is off, or the scan errored and the
+    result cache had nothing to fall back on. Zero means a scan really did run
+    and the air was empty. Conflating the two is what made `bushdump wifi`
+    answer "No WiFi networks in range." with WiFi switched off — a live
+    `CWInterface` comes back either way, so emptiness alone proves nothing.
+    """
+    if not powered:
+        return None
+    if cached:
+        return cached
+    return None if scan_failed else 0
+
+
 def _scan_raw() -> tuple[int | None, list[str]]:
     """Scan once, returning (networks seen, readable SSIDs).
 
     `networks seen` is None when the scan never ran — no framework, no WiFi
-    interface (radio switched off), or CoreWLAN raised. Zero means it ran and
-    the air really was empty.
+    interface, the radio switched off, or the scan itself errored with nothing
+    cached to fall back on. Zero means it ran and the air really was empty.
 
     Those two disagree under redaction: a perfectly healthy scan comes back with
     plenty of networks carrying valid RSSI/channel/security and not one name.
@@ -112,32 +140,15 @@ def _scan_raw() -> tuple[int | None, list[str]]:
         interface = CWWiFiClient.sharedWiFiClient().interface()
         if interface is None:
             return None, []
-        interface.scanForNetworksWithName_error_(None, None)
-        cached = interface.cachedScanResults()
-        if not cached:
-            return 0, []
-        return len(cached), [n.ssid() for n in cached if n.ssid()]
+        powered = bool(interface.powerOn())
+        _, err = interface.scanForNetworksWithName_error_(None, None)
+        cached = interface.cachedScanResults() or []
+        seen = _seen_from_scan(powered, err is not None, len(cached))
+        if seen is None:
+            return None, []
+        return seen, [n.ssid() for n in cached if n.ssid()]
     except Exception:
         return None, []
-
-
-def saved_ssids() -> list[str]:
-    """SSIDs macOS has saved for this interface.
-
-    Not a scan — these are remembered networks, in range or not. But
-    `networksetup` does not redact them, so a camera you have joined before is
-    still nameable on macOS 26. Empty if the lookup fails.
-    """
-    try:
-        iface = find_wifi_interface()
-        out = subprocess.run(
-            ["networksetup", "-listpreferredwirelessnetworks", iface],
-            capture_output=True,
-            text=True,
-        ).stdout
-    except Exception:
-        return []
-    return rank_ssids([ln.strip() for ln in out.splitlines()[1:] if ln.strip()])
 
 
 _CAMERA_SSID_HINTS = ("cam8z8", "trail cam")
@@ -154,16 +165,31 @@ def rank_ssids(ssids: list[str]) -> list[str]:
     return sorted(unique, key=lambda s: (not is_likely_camera_ssid(s), s.lower()))
 
 
+@dataclass(frozen=True)
+class ScanOutcome:
+    """What one watch window produced, and whether it managed to scan at all.
+
+    `scanned` is the difference between "we looked and the air was quiet" and
+    "we never got to look". Callers need it for their exit codes: under macOS 26
+    redaction an empty `ssids` is the permanent, expected state and not a
+    failure, whereas a radio that never scanned is.
+    """
+
+    ssids: list[str]
+    problem: str | None
+    scanned: bool
+
+
 def watch_ssids(
     seconds: float = 8.0,
     on_found: Callable[[str], None] | None = None,
-) -> tuple[list[str], str | None]:
+) -> ScanOutcome:
     """Repeatedly scan for `seconds`, calling `on_found(ssid)` as each new network
     appears (the camera AP can take a few seconds to come up).
 
-    Returns (ranked SSIDs, problem). `problem` explains an empty list — missing
-    framework, macOS 26 name redaction, or genuinely empty air — diagnosed from
-    the busiest scan of the watch itself, not a separate scan that might miss.
+    `problem` explains an empty list — missing framework, macOS 26 name
+    redaction, or genuinely empty air — diagnosed from the busiest scan of the
+    watch itself, not a separate scan that might miss.
     """
     names: set[str] = set()
     most_seen: int | None = None
@@ -181,7 +207,12 @@ def watch_ssids(
                     on_found(ssid)
         time.sleep(0.5)
     ranked = rank_ssids(list(names))
-    return ranked, diagnose_scan(corewlan_available(), most_seen, len(ranked))
+    framework = corewlan_available()
+    return ScanOutcome(
+        ssids=ranked,
+        problem=diagnose_scan(framework, most_seen, len(ranked)),
+        scanned=framework and most_seen is not None,
+    )
 
 
 def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bool | None:
@@ -194,17 +225,23 @@ def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bo
     Timeout defaults generously: even after a camera acks its BLE wake, the AP
     took ~25s to become *detectable* — part radio boot, part macOS scan
     scheduling, and the two can't be told apart from here.
+
+    Only report None when *no* poll in the whole window managed a real answer.
+    Throttled scans are the common case, not the exception — see `ssid_present`
+    — so treating "we saw an unknown at some point" as the verdict discarded
+    every definite answer that came with it, and this returned "couldn't tell"
+    for a camera it had confirmed absent three times over.
     """
     deadline = time.monotonic() + timeout
-    saw_unknown = False
+    answered = False
     while True:
         present = ssid_present(ssid)
         if present is True:
             return True
-        if present is None:
-            saw_unknown = True
+        if present is False:
+            answered = True
         if time.monotonic() >= deadline:
-            return None if saw_unknown else False
+            return False if answered else None
         time.sleep(interval)
 
 
@@ -236,6 +273,18 @@ def find_wifi_interface() -> str:
     return iface
 
 
+def join_succeeded(returncode: int, stdout: str) -> bool:
+    """Did `networksetup -setairportnetwork` actually join?
+
+    It reports failure on *stdout* and still exits 0 — "Could not find network
+    X." comes back as a clean exit — so the exit status alone always reads as
+    success. Any output at all means it did not join. That error line is also
+    one of the few SSID-bearing strings macOS 26 does not redact, so it is worth
+    keeping intact for the caller to report.
+    """
+    return returncode == 0 and not stdout.strip()
+
+
 def join(
     ssid: str,
     password: str,
@@ -253,9 +302,7 @@ def join(
             capture_output=True,
             text=True,
         )
-        # networksetup prints an error line to stdout but still exits 0, so we
-        # treat any non-empty output as failure.
-        if result.returncode == 0 and not result.stdout.strip():
+        if join_succeeded(result.returncode, result.stdout):
             return
         last_err = (result.stdout + result.stderr).strip()
         time.sleep(interval)

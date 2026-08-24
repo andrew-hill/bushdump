@@ -312,3 +312,44 @@ def test_wake_action_rewakes_when_presence_unknown():
 def test_wake_action_proceeds_anyway_after_last_attempt():
     """Out of wakes, try the join regardless — its error is our other oracle."""
     assert cli._next_wake_action(ack=False, presence=False, attempt=3, max_attempts=3) == "proceed"
+
+
+# --- _is_expected_camera_error: which failures print a line, not a traceback ---
+#
+# Trail cameras are flaky by nature, so the routine failures — asleep, out of
+# range, AP down mid-download — must not dump a stack trace at someone standing
+# in a paddock. This pins which exception types count as routine.
+
+
+def test_expected_camera_error_covers_a_failed_join():
+    # wifi.join raises this when networksetup cannot find the AP, which is the
+    # normal outcome for a camera that is asleep or out of range.
+    err = RuntimeError("Failed to join 'CAM8Z8_AABBCC112233' within 45s: Could not find network")
+    assert cli._is_expected_camera_error(err)
+
+
+def test_expected_camera_error_covers_missing_files():
+    assert cli._is_expected_camera_error(FileNotFoundError("no such file"))
+
+
+def test_expected_camera_error_covers_httpx_failures():
+    import httpx
+
+    assert cli._is_expected_camera_error(httpx.ConnectError("connection refused"))
+    assert cli._is_expected_camera_error(httpx.ReadTimeout("timed out"))
+
+
+def test_expected_camera_error_excludes_real_bugs():
+    # A programming error should still surface with its full traceback.
+    assert not cli._is_expected_camera_error(ValueError("bad value"))
+    assert not cli._is_expected_camera_error(KeyError("missing"))
+
+
+def test_expected_camera_error_excludes_bleak_errors():
+    # BleakError is not a RuntimeError, so it deliberately does not match here.
+    # Bluetooth-unavailable is caught where it can arise instead — _wake_and_report
+    # and cmd_sync's scan step — which report it with their own advice.
+    from bleak.exc import BleakBluetoothNotAvailableError, BleakBluetoothNotAvailableReason
+
+    err = BleakBluetoothNotAvailableError("off", BleakBluetoothNotAvailableReason.POWERED_OFF)
+    assert not cli._is_expected_camera_error(err)

@@ -11,6 +11,15 @@
 
 ## Next-visit camera smoke tests
 
+### BLE "device not found" — is it ever a false negative?
+
+- [ ] With a camera in range but asleep, run `bd sync <name>` and check whether
+      any of the three BLE attempts reports "device not found within 20s". Then
+      repeat at the *edge* of BLE range, and once more with the camera already
+      awake (AP up) to see whether it stops advertising. This is the one thing
+      blocking the `_wake_join` early-bail in the macOS 26 section below — the
+      208s failed-join cost is already measured off-site.
+
 ### `bd backup` / `bd prune`
 
 **Backup happy path**
@@ -93,9 +102,14 @@ Apple-silicon issue; it's the OS version.
 report one — `scanForNetworksWithName_("G")` returns 2 hits, a bogus name
 returns 0. So we can ask "is this AP present?" without ever reading a name.
 Presence is three-state (present / absent / unknown) because a scan can come
-back `Resource busy` — and unknown must never be read as absent. In practice
-that's rare: hammering scans in a tight loop produced ~50% busy, but real
-polling at 3s intervals across every on-site run produced none at all.
+back `Resource busy` — and unknown must never be read as absent. Unknowns are
+the *common* case, not a rarity: measured off-site 2026-08-24 at the real 3s
+interval, a genuine scan takes ~7s and answers, then the next ~3 polls throttle,
+giving ~2/3 unknown overall. The earlier "no busy at 3s on site" reading came
+from scanning for an implausible name, which macOS answers from cache without
+ever scanning — see "Directed-scan throttling" in `docs/camera-api.md`. So poll
+through unknowns and keep the last definite answer; never let a run of them
+become the verdict.
 
 Also unredacted: `networksetup -listpreferredwirelessnetworks` (saved networks,
 no admin needed), the "Could not find network X" error from
@@ -106,15 +120,33 @@ no admin needed), the "Could not find network X" error from
 - [ ] `register` — offer saved networks as a pick-list (camera-likely first),
       plus join-and-diff to detect a brand-new camera. Live SSID listing can't
       work under redaction. Where the BLE module programs System ID, derive the
-      SSID from GATT instead (see `docs/camera-api.md`).
+      SSID from GATT instead (see `docs/camera-api.md`). The pick-list source is
+      `networksetup -listpreferredwirelessnetworks <iface>`, which macOS 26 does
+      not redact; `wifi.saved_ssids()` wrapped it but was deleted as dead code,
+      so rebuild it here when this lands.
 - [ ] `_wake_join` always wakes+joins now. The old "already reachable, skip
       wake+join" short-circuit probed `camera_host`, which every camera answers
       on (`192.168.8.1:8080` for all of them), so it could take camera A for
       camera B and file A's photos under B. Joining by SSID is what actually
       identifies a camera. If the extra BLE wake grates on site, reorder rather
       than restore: join first (identity), then probe, and skip the wake when
-      the camera already answers. Measure a *failed* join (camera asleep) first
-      — that's the cost that decides whether it's worth it.
+      the camera already answers.
+
+      **Failed-join cost measured** (off-site, 2026-08-24, stale BLE address so
+      the camera is unreachable): `bd sync <name>` takes **208s** before it
+      gives up — 3×20s BLE scans + 3×15s AP-boot checks + 40s final wait + 45s
+      join. Every BLE attempt returned the conclusive "device not found within
+      20s", and `_wake_and_report` swallows that into a bare `False`, so the
+      full ladder runs for a camera BLE never saw.
+
+      Blocked on one on-site question: **is "BLE device not found within 20s"
+      ever a false negative for a camera that IS present?** If it is reliable,
+      `_wake_and_report` should distinguish it from "no ack" and `_wake_join`
+      should skip the AP waits for that attempt — worth ~85s. If a present
+      camera can go unseen by BLE for 20s (flaky advertising, edge of range),
+      the current patience is buying something and should stay. Test at the edge
+      of BLE range, not just from far away — and note a camera already awake may
+      stop advertising, which is the case that makes it unsafe.
 - [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
       us poll wake state without any WiFi scan. **Writes to the camera**: query
       forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/
