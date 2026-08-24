@@ -33,6 +33,12 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - **System ID (`00002a23`) carries the WiFi MAC** as EUI-64, so the SSID can be
   derived over BLE without a WiFi scan — see `camera-api.md` "GATT table"
 - BLE wake char: `6e400004-b5a3-f393-e0a9-e50e24dcca9e`, expects `OK\r\n`
+- **Advertises continuously, including while awake** (2026-08-24): 5/5 BLE finds
+  with the AP down, 5/5 with the AP up, worst case 3.1s against a 20s budget. So
+  "device not found" from `find_device_by_address` is *not* a false negative for
+  an already-woken camera — the radio coming up does not silence the beacon.
+- AP detectable 26.2s after the ack (2026-08-24), matching the ~25s budget in
+  `camera-api.md`.
 - HTTP confirmed: `/cmd/info/1..5`, `/cmd/getSetting`, `/cmd/getParaSetting`,
   `/cmd/standby/reset`, `/list/detail/forward/0/10`
 - `type` enum seen: `1` (photo). No videos on the SD card yet, so `2`
@@ -64,6 +70,13 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - **Wake reliability**: BLE `connect()` occasionally times out on the first
   attempt (macOS CoreBluetooth race); a second attempt always succeeds. This
   is a BLE distance/timing issue, not a characteristic mismatch.
+- **Advertises continuously, including while awake** (2026-08-24): 5/5 BLE finds
+  with the AP down, 5/5 with the AP up, worst case 6.1s against a 20s budget —
+  same as the E6PMB despite the different (Linkiing/Telink) module, so this is
+  not vendor-specific. "Device not found" is not a false negative for a camera
+  that is already up.
+- AP detectable 22.3s after a *silent* wake (no ack) on 2026-08-24 — a second
+  observation of the no-ack-but-woke case noted above.
 - HTTP confirmed: `/cmd/info/1..5`, `/cmd/getSetting`, `/cmd/getParaSetting`,
   `/cmd/standby/reset`, `/list/detail/forward/`
 - `/cmd/info/2` field variation: uses `voltage` (0–100 scale) and

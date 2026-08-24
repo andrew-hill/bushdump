@@ -44,8 +44,8 @@ def check_clock(camera_clock_utc: datetime, now_utc: datetime) -> Warning | None
     abs_drift = abs(drift)
     if abs_drift < _CLOCK_WARN_SECS:
         return None
-    direction = "ahead" if drift > 0 else "behind"
-    msg = f"Camera clock is {abs_drift:.0f}s {direction} of laptop"
+    direction = "ahead of" if drift > 0 else "behind"
+    msg = f"Camera clock is {abs_drift:.0f}s {direction} laptop"
     level: Literal["warn", "alert"] = "alert" if abs_drift >= _CLOCK_ALERT_SECS else "warn"
     return Warning(level=level, code="clock_drift", message=msg)
 

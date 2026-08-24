@@ -13,18 +13,33 @@
 
 ### BLE "device not found" — is it ever a false negative?
 
-- [ ] With a camera in range but asleep, run `bd sync <name>` and check whether
-      any of the three BLE attempts reports "device not found within 20s". Then
-      repeat at the *edge* of BLE range, and once more with the camera already
-      awake (AP up) to see whether it stops advertising. This is the one thing
-      blocking the `_wake_join` early-bail in the macOS 26 section below — the
-      208s failed-join cost is already measured off-site.
+**Answered 2026-08-24 for the case that mattered.** Both cameras advertise
+continuously whether asleep or awake with the AP up: 10/10 finds in each state
+across both BLE modules, worst case 6.1s against a 20s budget. The dangerous
+hypothesis — that a camera goes quiet once its radio is on, making "not found"
+mean "already awake" — is refuted, and the `_wake_join` early bail is unblocked.
+
+- [ ] Still untested: the *edge* of BLE range, where a present camera might go
+      unseen for a full 20s. Not blocking — gating the bail on a definite
+      `ssid_present` False covers it, since an awake-but-BLE-unreachable camera
+      still shows its AP. Worth measuring if the bail ever misbehaves on site.
 
 ### `bd backup` / `bd prune`
 
 **Backup happy path**
 - [ ] Full cycle: `bd sync` → `bd backup` → `bd prune` — confirm each step
       sees the state left by the prior.  *(needs camera in range)*
+
+      `sync` → `backup` half confirmed 2026-08-24: backup picked up the files
+      that sync had just written and advanced its watermark to exactly the sync
+      watermark on both cameras (`2026-08-23 09:50:01` and
+      `2026-08-22 17:30:00`), 0 pending, local counts matching the server.
+      The NAS had been 9 days stale at `2026-08-15` before that run.
+      Still to do: the `backup` → `prune` half, which needs a camera in range.
+
+- [ ] Chase the backup warning: "1 non-media file(s) on server not present
+      locally" (2026-08-24). Extra on the server, so nothing is at risk — but
+      worth identifying.
 
 **Backup flags**
 - [ ] Failed transfer (kill rsync mid-flight): watermark does NOT advance.  *(needs large transfer in flight to test)*
@@ -70,6 +85,12 @@
 
 Things to confirm on hardware next time each camera is in range.
 Update `docs/camera-models.md` with findings afterwards.
+
+**Two of these cannot be done incidentally** (confirmed on site 2026-08-24):
+video needs a special trip to switch a camera into video mode — neither records
+video now, and all 2337 files across both cameras are JPG — and the battery
+check needs the solar panels physically unplugged, which is awkward enough to
+be its own errand. Don't expect either to fall out of a routine sync.
 
 ### GardePro E6PMB
 
@@ -139,14 +160,13 @@ no admin needed), the "Could not find network X" error from
       20s", and `_wake_and_report` swallows that into a bare `False`, so the
       full ladder runs for a camera BLE never saw.
 
-      Blocked on one on-site question: **is "BLE device not found within 20s"
-      ever a false negative for a camera that IS present?** If it is reliable,
-      `_wake_and_report` should distinguish it from "no ack" and `_wake_join`
-      should skip the AP waits for that attempt — worth ~85s. If a present
-      camera can go unseen by BLE for 20s (flaky advertising, edge of range),
-      the current patience is buying something and should stay. Test at the edge
-      of BLE range, not just from far away — and note a camera already awake may
-      stop advertising, which is the case that makes it unsafe.
+      **Unblocked 2026-08-24.** Cameras keep advertising while awake (10/10,
+      both modules), so "not found" does not mean "already up". Implement it as:
+      `_wake_and_report` distinguishes "BLE never saw the device" from "no ack",
+      and `_wake_join` skips that attempt's AP wait when BLE saw nothing *and*
+      `ssid_present` returns a definite False. Worth ~85s of the 208s. Keep the
+      AP-presence half of the gate — it is what makes the edge-of-range case
+      safe without having measured it.
 - [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
       us poll wake state without any WiFi scan. **Writes to the camera**: query
       forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/
