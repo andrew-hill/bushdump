@@ -37,9 +37,11 @@ mean "already awake" — is refuted, and the `_wake_join` early bail is unblocke
       The NAS had been 9 days stale at `2026-08-15` before that run.
       Still to do: the `backup` → `prune` half, which needs a camera in range.
 
-- [ ] Chase the backup warning: "1 non-media file(s) on server not present
-      locally" (2026-08-24). Extra on the server, so nothing is at risk — but
-      worth identifying.
+- [ ] Delete the stale `.DS_Store` left in one camera's folder on the NAS. It
+      is what the "non-media file on server" warning was reporting (identified
+      2026-08-24). New ones no longer propagate, but an rsync `--exclude`
+      protects the existing copy from `--delete` rather than removing it, so
+      the warning repeats until it is deleted by hand.
 
 **Backup flags**
 - [ ] Failed transfer (kill rsync mid-flight): watermark does NOT advance.  *(needs large transfer in flight to test)*
