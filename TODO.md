@@ -76,8 +76,6 @@ mean "already awake" — is refuted, and the `_wake_join` early bail is unblocke
       an unexpected shape — clock check should be silently skipped, not fatal.
 
 **Clock-sync bands**
-- [ ] Modest drift (5s ≤ |drift| < `clock_auto_sync_secs`, default 900): `bd sync <name>`
-      auto-syncs silently with a one-line info message, no prompt.
 - [ ] Large drift (≥ threshold): warn + prompt appears; decline it (or let it time out)
       and confirm the end-of-sync re-warn fires before power-off.
 - [ ] `bd clock <name> --sync`: the set lands within ~1s of laptop time (not your

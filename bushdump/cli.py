@@ -980,6 +980,16 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+# A .part is a download caught mid-write, so backing one up is never useful — on
+# the far side it is indistinguishable from a complete file. They stay valuable
+# *locally*: the next sync reopens the same path with "wb" and validates size and
+# media before renaming, so they self-heal, and finding one tells you a sync was
+# interrupted. Excluded from the verify pass as well as the transfer, or each one
+# would simply swap a "on server, not present locally" warning for a "differs
+# from server" one. Anything else unexpected on either side is still reported.
+_RSYNC_EXCLUDES = ["--exclude=*.part", "--exclude=*.part2"]
+
+
 def _backup_one(
     cam: config.Camera,
     args: argparse.Namespace,
@@ -1027,7 +1037,8 @@ def _backup_one(
 
     if not args.verify_only and not args.dry_run:
         print(f"  Transferring → {dst} ...")
-        transfer_cmd = [rsync_bin, "-rlt", "--partial", "--stats"] + cfg.backup.args
+        transfer_cmd = [rsync_bin, "-rlt", "--partial", "--stats", *_RSYNC_EXCLUDES]
+        transfer_cmd += cfg.backup.args
         if args.verbose:
             transfer_cmd.append("-v")
         transfer_cmd += [src, dst]
@@ -1051,7 +1062,7 @@ def _backup_one(
                 file=sys.stderr,
             )
 
-    verify_cmd = [rsync_bin, "-rltnv", "--delete", "--itemize-changes"]
+    verify_cmd = [rsync_bin, "-rltnv", "--delete", "--itemize-changes", *_RSYNC_EXCLUDES]
     if args.checksum:
         verify_cmd.append("-c")
     verify_cmd += [src, dst]
