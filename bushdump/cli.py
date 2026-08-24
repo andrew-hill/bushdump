@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from enum import Enum
 from typing import IO, TYPE_CHECKING
 
 import argcomplete
@@ -32,6 +33,17 @@ _MEDIA_TYPE_CODE = {"Photo": 1, "Video": 2}
 # Set by cmd_sync before calling into _sync_one/_wake_and_report; reset after.
 _log_file: IO[str] | None = None
 _verbose: bool = False
+# Whether this run actually moved the laptop onto a camera AP. Only then is the
+# closing "rejoin your normal network" notice true — a run that bailed on every
+# camera never left the network it started on, and saying otherwise sends you
+# hunting through WiFi settings for nothing.
+_joined_ap: bool = False
+
+
+def _note_joined_ap() -> None:
+    """Record that we are now on a camera's AP, not the network we started on."""
+    global _joined_ap
+    _joined_ap = True
 
 
 def _out(msg: str = "", *, err: bool = False) -> None:
@@ -247,40 +259,96 @@ def _cache_identity(client: CameraClient, cam_name: str) -> None:
         pass
 
 
-# How long to wait for the AP after a silent wake, before re-waking. Detection
-# lags a wake by ~25s — that's macOS scan scheduling as much as radio boot, and
-# the two can't be told apart — so this is deliberately shorter: two attempts
-# cover the observed lag, and a camera that woke without acking is caught on the
-# first pass instead of the third.
-_AP_BOOT_CHECK_SECS = 15.0
+# How long to wait for the AP after a wake the camera did receive, before
+# re-waking. Detection lags a wake by ~25s (26.2s and 22.3s measured 2026-08-24
+# on the two models), so a window shorter than that is guaranteed to come back
+# empty and burn an extra wake — which is exactly what the E8 2.0 Pro hit on
+# every sync, since it never acks and so always took this path.
+_AP_BOOT_CHECK_SECS = 30.0
+
+# How long to spend asking whether the AP is *already* up, when BLE never saw
+# the camera. Nothing was woken, so there is no boot latency to wait out; the
+# only question is whether some earlier wake left the radio on. Long enough for
+# a couple of polls to survive scan throttling, and no longer.
+_AP_ALREADY_UP_SECS = 10.0
 
 
-def _next_wake_action(ack: bool, presence: bool | None, attempt: int, max_attempts: int) -> str:
-    """Decide what to do after one BLE wake: "proceed" or "rewake".
+class CameraUnreachable(RuntimeError):
+    """We established the camera is not there, and stopped early on purpose.
 
-    The ack is reliable when it arrives and meaningless when it doesn't — the
-    camera often wakes without acking. So an ack short-circuits straight to the
-    join, and otherwise we lean on AP presence, which on macOS 26 is three-state:
-    True/False/None, where None means a rate-limited scan couldn't tell us.
-
-    Only True stops the waking; None re-wakes like False does. That is not the
-    "never read None as absent" rule being broken — that rule protects callers
-    who would give up on a live camera. Here the cost of guessing wrong is one
-    extra idempotent wake, so when we can't tell, we wake again.
-
-    "proceed" means stop waking and move on to waiting for the AP — not join
-    this instant. An ack says the camera accepted the wake, not that we can yet
-    see the AP: detection lagged the ack by ~25s on an E6PMB (macOS scan
-    scheduling as much as radio boot — we can't separate them).
-
-    Out of attempts we proceed anyway: `networksetup` reports "Could not find
-    network" when the AP really is down, so the join is our second oracle.
+    Distinct from the RuntimeErrors that surface a failure we did not predict:
+    those print a traceback tail because the stack is the diagnosis. Here the
+    message is the entire diagnosis, so printing anything more is noise at
+    someone standing in a paddock.
     """
-    if ack or presence is True:
+
+
+class WakeOutcome(Enum):
+    """What one BLE wake attempt established.
+
+    Collapsing these into a bool threw away the two most useful facts. ACKED and
+    SENT both mean the camera received the payload — the E8 2.0 Pro never acks
+    and wakes regardless — while NOT_FOUND is the only outcome that says
+    anything definite about the camera being absent.
+    """
+
+    ACKED = "acked"
+    SENT = "sent"
+    NOT_FOUND = "not_found"
+    FAILED = "failed"
+
+
+def _next_wake_action(
+    outcome: WakeOutcome, presence: bool | None, attempt: int, max_attempts: int
+) -> str:
+    """Decide what to do after one BLE wake: "proceed", "rewake" or "bail".
+
+    An ack short-circuits straight to the join. Otherwise we lean on AP
+    presence, which on macOS 26 is three-state: True/False/None, where None
+    means a rate-limited scan couldn't tell us.
+
+    None re-wakes like False does. That is not the "never read None as absent"
+    rule being broken — that rule protects callers who would give up on a live
+    camera. Here the cost of guessing wrong is one extra idempotent wake, so
+    when we can't tell, we wake again.
+
+    "bail" needs two independent negatives agreeing, twice: BLE completed a scan
+    without seeing the camera, *and* a scan for its AP came back definitely
+    absent. Either alone is not enough — BLE could be having a bad moment, and a
+    throttled WiFi scan reports None rather than False — but a camera that is
+    neither advertising nor serving an AP is not there, and grinding through the
+    remaining wakes, the AP wait and the join costs ~208s to learn nothing. We
+    still never bail on the first attempt, so one transient cannot strand a
+    camera that is really present.
+
+    Out of attempts we otherwise proceed anyway: `networksetup` reports "Could
+    not find network" when the AP really is down, so the join is our other
+    oracle.
+    """
+    if outcome is WakeOutcome.ACKED or presence is True:
         return "proceed"
+    if outcome is WakeOutcome.NOT_FOUND and presence is False and attempt > 1:
+        return "bail"
     if attempt < max_attempts:
         return "rewake"
     return "proceed"
+
+
+def _presence_after_wake(ssid: str, outcome: WakeOutcome) -> bool | None:
+    """Check for the AP, with a window sized to what the wake attempt achieved.
+
+    An ack settles it — don't spend time scanning for what we know is coming.
+    After a wake the camera received, allow for the full ~25s detection lag;
+    checking sooner always reads "absent" during it and burns wake attempts.
+    When BLE never saw the camera nothing was woken, so there is no boot to wait
+    out and the only question is whether the AP is already up.
+    """
+    from bushdump import wifi
+
+    if outcome is WakeOutcome.ACKED:
+        return None
+    window = _AP_ALREADY_UP_SECS if outcome is WakeOutcome.NOT_FOUND else _AP_BOOT_CHECK_SECS
+    return wifi.wait_for_ssid(ssid, timeout=window)
 
 
 def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
@@ -303,17 +371,21 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
         _out("No BLE address configured — skipping wake (turn WiFi on yourself).")
         _out(f"Joining WiFi '{cam.ssid}'...")
         wifi.join(cam.ssid, cam.password)
+        _note_joined_ap()
         return
 
     for attempt in range(1, attempts + 1):
-        ack = _wake_and_report(cam.ble_address, cam.name)
-        # An ack settles it — don't spend time scanning for what we know is coming.
-        # Without one, give the radio a chance before deciding the wake failed:
-        # checking instantly always reads "absent" during that lag, which burns
-        # every wake attempt before we ever wait properly.
-        presence = None if ack else wifi.wait_for_ssid(cam.ssid, timeout=_AP_BOOT_CHECK_SECS)
-        if _next_wake_action(ack, presence, attempt, attempts) == "proceed":
+        outcome = _wake_and_report(cam.ble_address, cam.name)
+        presence = _presence_after_wake(cam.ssid, outcome)
+        action = _next_wake_action(outcome, presence, attempt, attempts)
+        if action == "proceed":
             break
+        if action == "bail":
+            raise CameraUnreachable(
+                f"{cam.name}: BLE scanned without seeing the camera and its AP "
+                f"{cam.ssid!r} is not in range either — it is asleep or out of range. "
+                "Nothing to join."
+            )
         _out(f"  (attempt {attempt}/{attempts}: AP not up yet — re-waking)")
 
     _out(f"Waiting for AP '{cam.ssid}'...")
@@ -325,6 +397,7 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
 
     _out(f"Joining WiFi '{cam.ssid}'...")
     wifi.join(cam.ssid, cam.password, timeout=45.0)
+    _note_joined_ap()
 
 
 def _resolve_camera(name: str) -> config.Camera | None:
@@ -505,12 +578,13 @@ def cmd_keepalive(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    global _log_file, _verbose
+    global _log_file, _verbose, _joined_ap
     import httpx
 
     from bushdump import ble
 
     _verbose = args.verbose
+    _joined_ap = False
     log = _open_log(args.log)
     _log_file = log
     try:
@@ -573,6 +647,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 if all_conflicts:
                     _out_conflicts(all_conflicts)
                 return 1
+            except CameraUnreachable as e:
+                _out(f"  {e}", err=True)
+                failed = True
             except (
                 httpx.ConnectError,
                 httpx.TimeoutException,
@@ -589,7 +666,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
         _out(f"\nDone — {total} new file(s).")
         if all_conflicts:
             _out_conflicts(all_conflicts)
-        _out("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
+        if _joined_ap:
+            _out("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
         return 1 if failed else 0
     finally:
         if caffeine is not None:
@@ -598,6 +676,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             log.close()
         _log_file = None
         _verbose = False
+        _joined_ap = False
 
 
 def _sync_one(
@@ -613,6 +692,7 @@ def _sync_one(
 
     if args.manual_wifi:
         input(f"Join WiFi '{cam.ssid}' (password: {cam.password}), then press Enter...")
+        _note_joined_ap()
     else:
         _wake_join(cam)
 
@@ -828,12 +908,14 @@ def cmd_wake(args: argparse.Namespace) -> int:
     return 0
 
 
-def _wake_and_report(address: str, label: str) -> bool:
-    """Wake the camera by address, printing its ack. True if the ack arrived.
+def _wake_and_report(address: str, label: str) -> WakeOutcome:
+    """Wake the camera by address, reporting what the attempt established.
 
     The ack is one-directional evidence: when it comes back the camera really
     did accept the wake, but silence proves nothing — cameras frequently wake
-    without acking. Callers must not read False as "still asleep".
+    without acking, so SENT is not a failure. NOT_FOUND is the outcome that
+    carries real information, and it is printed plainly because that is the line
+    you want to read standing in a paddock wondering why nothing happened.
     """
     from bleak.exc import BleakBluetoothNotAvailableError
 
@@ -842,21 +924,24 @@ def _wake_and_report(address: str, label: str) -> bool:
     _out(f"Waking {label} over BLE to bring its WiFi up...")
     try:
         reply = asyncio.run(ble.wake_wifi(address))
+    except ble.DeviceNotFound:
+        _out("  (BLE scan finished without seeing this camera — asleep, or out of range)")
+        return WakeOutcome.NOT_FOUND
     except BleakBluetoothNotAvailableError:
         _out("  (Bluetooth unavailable — check macOS Privacy & Security settings.)")
-        return False
+        return WakeOutcome.FAILED
     except Exception as e:
         _out(f"  (BLE wake failed: {e})")
-        return False
+        return WakeOutcome.FAILED
     if reply is None:
-        _out("  (no ack from camera — WiFi may still be coming up)")
-        return False
+        _out("  (wake sent, camera did not ack — some models never do, and wake anyway)")
+        return WakeOutcome.SENT
     try:
         text = reply.decode("utf-8").strip()
     except UnicodeDecodeError:
         text = reply.hex()
     _out(f"  camera ack: {text!r}")
-    return True
+    return WakeOutcome.ACKED
 
 
 def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:

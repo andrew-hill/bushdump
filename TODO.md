@@ -160,13 +160,13 @@ no admin needed), the "Could not find network X" error from
       20s", and `_wake_and_report` swallows that into a bare `False`, so the
       full ladder runs for a camera BLE never saw.
 
-      **Unblocked 2026-08-24.** Cameras keep advertising while awake (10/10,
-      both modules), so "not found" does not mean "already up". Implement it as:
-      `_wake_and_report` distinguishes "BLE never saw the device" from "no ack",
-      and `_wake_join` skips that attempt's AP wait when BLE saw nothing *and*
-      `ssid_present` returns a definite False. Worth ~85s of the 208s. Keep the
-      AP-presence half of the gate — it is what makes the edge-of-range case
-      safe without having measured it.
+      **Early bail done 2026-08-24** — `_wake_and_report` now returns a
+      `WakeOutcome`, and `_wake_join` gives up when BLE completed a scan without
+      seeing the camera *and* its AP is definitely absent, from the second
+      attempt on. An out-of-range `bd sync <name>` went 208s → 61s, measured.
+      Still to do here: **join first, then probe**, so a command run while
+      already on the right camera's AP skips the wake entirely. That is the
+      other half of this item and is untouched.
 - [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
       us poll wake state without any WiFi scan. **Writes to the camera**: query
       forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/

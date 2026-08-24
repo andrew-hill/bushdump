@@ -72,7 +72,8 @@ Each camera is a `[cameras.<name>]` section (short human name) with its own
 
 `sync` (no name): BLE-scan for presence → `cameras_present` matches configured
 cameras by stored address → sync each. `sync <name>` targets one directly. Per
-camera: BLE wake → join AP (retries until up) → **poll** camera HTTP until ready
+camera: BLE wake → join AP (retries until up, or gives up early when BLE saw no
+camera *and* no AP) → **poll** camera HTTP until ready
 → per media type list+paginate, download files newer than the
 saved watermark → save watermark → power off camera WiFi. We do **not**
 auto-restore your normal WiFi — the laptop stays on the (last) camera's AP; you

@@ -288,30 +288,94 @@ def test_command_aliases_preserve_arguments():
 # must never be treated as "absent".
 
 
+def _action(outcome, presence, attempt=1, max_attempts=3):
+    return cli._next_wake_action(outcome, presence, attempt, max_attempts)
+
+
 def test_wake_action_proceeds_on_ack():
     """An ack means the wake was accepted, so stop re-waking. It does NOT mean the
     AP is visible — detection lagged the ack by ~25s on an E6PMB — so proceeding
     means waiting for the AP, not joining this instant."""
-    assert cli._next_wake_action(ack=True, presence=None, attempt=1, max_attempts=3) == "proceed"
+    assert _action(cli.WakeOutcome.ACKED, None) == "proceed"
 
 
 def test_wake_action_proceeds_when_ap_seen_despite_no_ack():
-    """Observed on an E8 2.0 Pro: three wake attempts, no ack, AP up regardless."""
-    assert cli._next_wake_action(ack=False, presence=True, attempt=1, max_attempts=3) == "proceed"
+    """Observed on an E8 2.0 Pro: wake sent, no ack, AP up regardless."""
+    assert _action(cli.WakeOutcome.SENT, True) == "proceed"
 
 
 def test_wake_action_rewakes_when_ap_definitely_absent():
-    assert cli._next_wake_action(ack=False, presence=False, attempt=1, max_attempts=3) == "rewake"
+    assert _action(cli.WakeOutcome.SENT, False) == "rewake"
 
 
 def test_wake_action_rewakes_when_presence_unknown():
     """`Resource busy` from a rate-limited scan is not evidence of absence."""
-    assert cli._next_wake_action(ack=False, presence=None, attempt=1, max_attempts=3) == "rewake"
+    assert _action(cli.WakeOutcome.SENT, None) == "rewake"
 
 
 def test_wake_action_proceeds_anyway_after_last_attempt():
     """Out of wakes, try the join regardless — its error is our other oracle."""
-    assert cli._next_wake_action(ack=False, presence=False, attempt=3, max_attempts=3) == "proceed"
+    assert _action(cli.WakeOutcome.SENT, False, attempt=3) == "proceed"
+
+
+# The bail needs both negatives, and needs them twice.
+
+
+def test_wake_action_bails_when_ble_and_ap_both_say_absent():
+    assert _action(cli.WakeOutcome.NOT_FOUND, False, attempt=2) == "bail"
+
+
+def test_wake_action_never_bails_on_the_first_attempt():
+    """One transient must not strand a camera that is really there."""
+    assert _action(cli.WakeOutcome.NOT_FOUND, False, attempt=1) == "rewake"
+
+
+def test_wake_action_does_not_bail_on_a_throttled_scan():
+    """None is "couldn't tell", never "absent" — bailing on it would give up on a
+    camera whose AP is up while macOS happened to throttle the scan."""
+    assert _action(cli.WakeOutcome.NOT_FOUND, None, attempt=3) == "proceed"
+
+
+def test_wake_action_does_not_bail_when_the_ap_is_up():
+    """BLE missing a camera whose AP is serving means BLE had a bad moment, not
+    that the camera is absent. Join it."""
+    assert _action(cli.WakeOutcome.NOT_FOUND, True, attempt=2) == "proceed"
+
+
+def test_wake_action_does_not_bail_on_a_generic_wake_failure():
+    """FAILED covers Bluetooth off and connect/write errors — none of which tell
+    us anything about the camera. Only a completed scan that saw nothing does."""
+    assert _action(cli.WakeOutcome.FAILED, False, attempt=3) == "proceed"
+
+
+# --- _presence_after_wake: the window is sized to what the wake achieved ---
+
+
+def _window_used(outcome) -> float | None:
+    seen: dict[str, float] = {}
+
+    def fake_wait(ssid, timeout=40.0, interval=3.0):
+        seen["timeout"] = timeout
+        return False
+
+    with patch("bushdump.wifi.wait_for_ssid", side_effect=fake_wait):
+        cli._presence_after_wake("CAM8Z8_AABBCC112233", outcome)
+    return seen.get("timeout")
+
+
+def test_presence_after_ack_does_not_scan_at_all():
+    assert _window_used(cli.WakeOutcome.ACKED) is None
+
+
+def test_presence_after_a_received_wake_covers_the_boot_lag():
+    """Measured 26.2s and 22.3s on the two models, so a shorter window is
+    guaranteed to read "absent" and burn an extra wake."""
+    assert _window_used(cli.WakeOutcome.SENT) >= 25.0
+
+
+def test_presence_after_not_found_only_asks_if_the_ap_is_already_up():
+    """Nothing was woken, so there is no boot latency to wait out."""
+    assert _window_used(cli.WakeOutcome.NOT_FOUND) < _window_used(cli.WakeOutcome.SENT)
 
 
 # --- _is_expected_camera_error: which failures print a line, not a traceback ---
