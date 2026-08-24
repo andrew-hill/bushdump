@@ -986,8 +986,12 @@ def cmd_register(args: argparse.Namespace) -> int:
 # media before renaming, so they self-heal, and finding one tells you a sync was
 # interrupted. Excluded from the verify pass as well as the transfer, or each one
 # would simply swap a "on server, not present locally" warning for a "differs
-# from server" one. Anything else unexpected on either side is still reported.
-_RSYNC_EXCLUDES = ["--exclude=*.part", "--exclude=*.part2"]
+# from server" one. `.DS_Store` is here for the same reason from the other
+# direction: Finder writes one whenever you open the folder, it is meaningless
+# on a NAS, and one that got copied up in the past then vanished locally is
+# exactly what the "non-media file on server" warning kept reporting.
+# Anything else unexpected on either side is still reported.
+_RSYNC_EXCLUDES = ["--exclude=*.part", "--exclude=*.part2", "--exclude=.DS_Store"]
 
 
 def _backup_one(
