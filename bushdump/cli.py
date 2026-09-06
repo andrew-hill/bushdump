@@ -365,8 +365,21 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     camera answers on that same address, so reaching *a* camera never proved it
     was *this* one — joining by SSID does, because SSIDs carry the WiFi MAC and
     `networksetup` fails outright when the named network isn't there.
+
+    Reading back the SSID we are *already* on identifies a camera by that same
+    argument, so it is the one short-circuit worth keeping. macOS 26 redacts the
+    read, where it costs nothing: the redacted value never matches a configured
+    SSID and we fall through to the full wake+join. On macOS 15 it still fires
+    and saves a BLE wake per command.
     """
     from bushdump import wifi
+
+    if cam.ssid and wifi.current_ssid() == cam.ssid:
+        _out(f"Already on '{cam.ssid}' — skipping wake+join.")
+        # We are sitting on the camera's AP without having joined it here, and
+        # sync still owes the user the "rejoin your normal network" reminder.
+        _note_joined_ap()
+        return
 
     if not cam.ble_address:
         _out("No BLE address configured — skipping wake (turn WiFi on yourself).")

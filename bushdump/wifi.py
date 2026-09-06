@@ -273,6 +273,39 @@ def find_wifi_interface() -> str:
     return iface
 
 
+def parse_current_ssid(stdout: str) -> str | None:
+    """Pull the SSID out of `networksetup -getairportnetwork` output.
+
+    None when the line is not a network name at all — not associated, or an
+    error. Under macOS 26 the name comes back as a placeholder rather than the
+    real SSID; that needs no detection here, because the only caller compares
+    the result against a configured SSID and a placeholder simply fails to
+    match, falling through to the full wake+join.
+    """
+    line = stdout.strip()
+    prefix = "Current Wi-Fi Network: "
+    return line[len(prefix) :] if line.startswith(prefix) else None
+
+
+def current_ssid(interface: str | None = None) -> str | None:
+    """The SSID we are associated with, or None. See `parse_current_ssid`.
+
+    Readable on macOS 15 and redacted on 26, which is why this answers a
+    question — "are we already on the camera's AP?" — that `ssid_present`
+    cannot: that one proves an AP is in the air, not that we are joined to it.
+    """
+    try:
+        iface = interface or find_wifi_interface()
+        result = subprocess.run(
+            ["networksetup", "-getairportnetwork", iface],
+            capture_output=True,
+            text=True,
+        )
+        return parse_current_ssid(result.stdout)
+    except Exception:
+        return None
+
+
 def join_succeeded(returncode: int, stdout: str) -> bool:
     """Did `networksetup -setairportnetwork` actually join?
 

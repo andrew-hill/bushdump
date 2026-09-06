@@ -22,6 +22,32 @@ generality. No service to deploy, no multi-tenancy, no scale concerns.
 - **pytest** — tests
 - **ruff** — lint + format (run before every commit)
 
+## Supported macOS versions
+
+**macOS 15 (Sequoia) and 26 (Tahoe) are both supported.** Keep it that way:
+nothing branches on the OS version, and nothing should — every WiFi path decides
+from what CoreWLAN or `networksetup` actually returns, so a machine that can
+read SSIDs gets the fast path and one that can't degrades on its own.
+
+Tahoe redacts SSIDs from any process without Apple's restricted
+`com.apple.developer.networking.wifi-info` entitlement, and that costs us two
+things Sequoia still has:
+
+- **Listing networks.** `bushdump wifi` and `register`'s SSID pick-list come back
+  empty on Tahoe, so you type the SSID in by hand. `ssid_present` works either
+  way — CoreWLAN filters a scan by a name it won't report — so *presence* checks
+  are unaffected.
+- **Skipping a redundant wake.** `_wake_join` short-circuits when
+  `wifi.current_ssid()` already matches the camera's SSID, which identifies the
+  device because SSIDs carry its WiFi MAC. Tahoe redacts that read, the
+  comparison fails, and every `stats`/`ls`/`clock`/`sync` pays a BLE wake and a
+  join it did not need. On Sequoia it fires and saves that.
+
+Neither is a correctness problem, so don't "fix" the redaction path by assuming
+it — the fallbacks have to stay good enough to be the only path. See the macOS 26
+section of `TODO.md` for what is and isn't redacted, and `docs/camera-api.md` for
+the measurements behind the timeouts.
+
 ## Commands
 
 Install once with `uv tool install --editable /path/to/bushdump` — then `bushdump` is on your PATH.
@@ -90,10 +116,8 @@ pick → BLE-wake → live-watches WiFi (re-scan for the AP-boot delay) → pick
 → password → join + confirm camera (shows `describe()`) → name it to save, or
 bail. Discovery lists *all* nearby devices/networks to pick from (no fragile
 filtering); `rank_ssids` only surfaces likely cameras first. WiFi listing needs
-Location permission to scan *and*, since macOS 26, Apple's restricted
-`wifi-info` entitlement to read the names back — which we don't have, so on
-Tahoe the list is always empty and you enter the SSID manually. Presence checks
-(`ssid_present`) still work, because CoreWLAN filters by a name it won't report.
+Location permission to scan at all — a separate gate from the name redaction in
+"Supported macOS versions" above, and the one that bites on Sequoia.
 
 ## Code philosophy
 

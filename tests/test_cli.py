@@ -512,3 +512,58 @@ def test_sync_failure_message_is_one_line_not_a_traceback(tmp_path, capsys):
     assert "Traceback" not in err
     assert file.name in err
     assert "Re-run to resume" in err
+
+
+# --- _wake_join short-circuit ---
+
+
+def _ap_camera() -> MagicMock:
+    cam = MagicMock()
+    cam.name = "frontgate"
+    cam.ssid = "CAM8Z8_AABBCCDDEEFF"
+    cam.password = "1234567890"
+    cam.ble_address = "D1AE237D-FF38-DF02-2E8D-A1A9813A0CD6"
+    return cam
+
+
+def test_wake_join_skips_wake_when_already_on_that_ssid(capsys):
+    """An SSID match identifies the camera: SSIDs carry the device's WiFi MAC."""
+    cam = _ap_camera()
+    with (
+        patch("bushdump.wifi.current_ssid", return_value=cam.ssid),
+        patch("bushdump.wifi.join") as join,
+        patch("bushdump.cli._wake_and_report") as wake,
+    ):
+        cli._wake_join(cam)
+
+    join.assert_not_called()
+    wake.assert_not_called()
+    assert cli._joined_ap, "still sitting on the camera's AP — sync must still say so"
+    assert "Already on" in capsys.readouterr().out
+
+
+def test_wake_join_proceeds_when_ssid_is_redacted(capsys):
+    """macOS 26 hands back a placeholder, which must not match and must not skip."""
+    cam = _ap_camera()
+    with (
+        patch("bushdump.wifi.current_ssid", return_value="<redacted>"),
+        patch("bushdump.wifi.join") as join,
+        patch("bushdump.wifi.wait_for_ssid", return_value=True),
+        patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
+    ):
+        cli._wake_join(cam)
+
+    join.assert_called_once()
+
+
+def test_wake_join_proceeds_when_on_a_different_ssid():
+    cam = _ap_camera()
+    with (
+        patch("bushdump.wifi.current_ssid", return_value="CAM8Z8_112233445566"),
+        patch("bushdump.wifi.join") as join,
+        patch("bushdump.wifi.wait_for_ssid", return_value=True),
+        patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
+    ):
+        cli._wake_join(cam)
+
+    join.assert_called_once()

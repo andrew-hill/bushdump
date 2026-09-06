@@ -7,6 +7,7 @@ from bushdump.wifi import (
     diagnose_scan,
     is_likely_camera_ssid,
     join_succeeded,
+    parse_current_ssid,
     parse_wifi_interface,
     rank_ssids,
     wait_for_ssid,
@@ -259,3 +260,29 @@ def test_wait_for_ssid_returns_true_as_soon_as_the_ap_appears():
 
 def test_wait_for_ssid_absence_survives_a_trailing_run_of_unknowns():
     assert _wait([None, False, None, None, None, None]) is False
+
+
+# --- parse_current_ssid ---
+
+
+def test_parse_current_ssid_reads_the_name():
+    assert parse_current_ssid("Current Wi-Fi Network: HomeNet\n") == "HomeNet"
+
+
+def test_parse_current_ssid_none_when_not_associated():
+    assert parse_current_ssid("You are not associated with an AirPort network.\n") is None
+
+
+def test_parse_current_ssid_keeps_spaces_in_the_name():
+    assert parse_current_ssid("Current Wi-Fi Network: The Frog Net\n") == "The Frog Net"
+
+
+def test_parse_current_ssid_redaction_does_not_match_a_real_ssid():
+    """Under macOS 26 the name comes back as a placeholder, not the SSID.
+
+    Callers compare against a configured SSID, so a placeholder simply fails to
+    match and they fall through to the full wake+join. Nothing has to detect
+    redaction for that to be safe.
+    """
+    redacted = parse_current_ssid("Current Wi-Fi Network: <redacted>\n")
+    assert redacted != "CAM8Z8_AABBCCDDEEFF"
