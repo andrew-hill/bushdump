@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 from bushdump import cli
 from bushdump.camera import CameraFile, CameraStats
 
@@ -211,9 +213,10 @@ def test_sync_warns_on_corrupt_download(tmp_path, capsys):
         patch("bushdump.camera.CameraClient", return_value=client),
         patch("bushdump.config.save_state"),
     ):
-        n, conflicts = cli._sync_one(mock_cam, {}, args)
+        result = cli._sync_one(mock_cam, {}, args)
 
-    assert n == 1
+    assert result.downloaded == 1
+    assert not result.stopped_early
     err = capsys.readouterr().err
     assert "validation failed" in err
     assert sidecar.name in err
@@ -261,9 +264,9 @@ def test_sync_retry_rerequests_sidecar_files(tmp_path, capsys):
         patch("bushdump.camera.CameraClient", return_value=client),
         patch("bushdump.config.save_state"),
     ):
-        n, conflicts = cli._sync_one(mock_cam, state, args)
+        result = cli._sync_one(mock_cam, state, args)
 
-    assert n == 1
+    assert result.downloaded == 1
     out = capsys.readouterr().out
     assert "retry" in out
 
@@ -417,3 +420,95 @@ def test_expected_camera_error_excludes_bleak_errors():
 
     err = BleakBluetoothNotAvailableError("off", BleakBluetoothNotAvailableReason.POWERED_OFF)
     assert not cli._is_expected_camera_error(err)
+
+
+def test_sync_stops_at_failed_file_without_advancing_watermark(tmp_path, capsys):
+    """A file we could not fetch must stay above the watermark.
+
+    The watermark is date-based and `todo` is oldest-first, so skipping a file
+    means the next success advances the watermark past it and no later run ever
+    asks for it again. Stopping is the only safe response.
+    """
+    files = [
+        CameraFile(id=1, type=1, date="2026-05-10 13:00:01", size=1024),
+        CameraFile(id=2, type=1, date="2026-05-10 13:10:01", size=1024),
+        CameraFile(id=3, type=1, date="2026-05-10 13:20:01", size=1024),
+    ]
+
+    mock_cam = MagicMock()
+    mock_cam.name = "frontgate"
+    mock_cam.camera_host = "192.168.8.1:8080"
+    mock_cam.ssid = "TestCam_AP"
+    mock_cam.output_dir = tmp_path
+    mock_cam.expect_ext_power = False
+
+    def _download(f, dest_dir, *, retry=False):
+        if f.id == 2:
+            raise httpx.ReadError("connection reset by peer")
+        return dest_dir / f.name
+
+    client = MagicMock()
+    client.wait_until_ready.return_value = True
+    client.list_all_files.return_value = files
+    client.download.side_effect = _download
+    client.stats.return_value = _healthy_stats()
+    client.parsed_time_info.return_value = None
+    client.__enter__ = lambda s: client
+    client.__exit__ = MagicMock(return_value=False)
+
+    args = MagicMock()
+    args.manual_wifi = False
+    args.keep_awake = False
+    args.retry = False
+
+    state: dict = {}
+    with (
+        patch("bushdump.cli._wake_join"),
+        patch("bushdump.camera.CameraClient", return_value=client),
+        patch("bushdump.config.save_state"),
+    ):
+        result = cli._sync_one(mock_cam, state, args)
+
+    assert result.downloaded == 1
+    assert result.stopped_early
+    # Advanced to file 1 only — file 2 is still above it and will be re-listed.
+    assert state["frontgate"]["Photo"] == "2026-05-10 13:00:01"
+    # File 3 was never attempted; stopping beats reaching past the gap.
+    assert client.download.call_count == 2
+
+
+def test_sync_failure_message_is_one_line_not_a_traceback(tmp_path, capsys):
+    file = CameraFile(id=1, type=1, date="2026-05-10 13:00:01", size=1024)
+
+    mock_cam = MagicMock()
+    mock_cam.name = "frontgate"
+    mock_cam.camera_host = "192.168.8.1:8080"
+    mock_cam.ssid = "TestCam_AP"
+    mock_cam.output_dir = tmp_path
+    mock_cam.expect_ext_power = False
+
+    client = MagicMock()
+    client.wait_until_ready.return_value = True
+    client.list_all_files.return_value = [file]
+    client.download.side_effect = httpx.ReadError("connection reset by peer")
+    client.stats.return_value = _healthy_stats()
+    client.parsed_time_info.return_value = None
+    client.__enter__ = lambda s: client
+    client.__exit__ = MagicMock(return_value=False)
+
+    args = MagicMock()
+    args.manual_wifi = False
+    args.keep_awake = False
+    args.retry = False
+
+    with (
+        patch("bushdump.cli._wake_join"),
+        patch("bushdump.camera.CameraClient", return_value=client),
+        patch("bushdump.config.save_state"),
+    ):
+        cli._sync_one(mock_cam, {}, args)
+
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert file.name in err
+    assert "Re-run to resume" in err

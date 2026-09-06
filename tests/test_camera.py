@@ -1,8 +1,10 @@
 from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
+from bushdump import camera as camera_mod
 from bushdump.camera import (
     CameraClient,
     CameraFile,
@@ -157,3 +159,89 @@ def test_delete_raises_on_bad_shape():
         client = CameraClient()
         with pytest.raises(RuntimeError, match="Delete failed"):
             client.delete(f)
+
+
+# --- CameraClient._stream_to_tmp retries ---
+
+
+def _make_stream_client(outcomes: list[object]) -> MagicMock:
+    """A stubbed httpx client whose `stream()` replays `outcomes` in order.
+
+    An exception instance is raised on that attempt; anything else is treated as
+    the body bytes to yield. Also answers `/cmd/standby/reset` as ready, so the
+    between-attempt `wait_until_ready` returns on its first poll without sleeping.
+    """
+    calls = iter(outcomes)
+
+    def _stream(_method: str, _url: str) -> MagicMock:
+        outcome = next(calls)
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        if isinstance(outcome, Exception):
+            resp.iter_bytes.side_effect = outcome
+        else:
+            resp.iter_bytes.return_value = [outcome]
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=resp)
+        ctx.__exit__ = MagicMock(return_value=False)
+        return ctx
+
+    ready = MagicMock()
+    ready.status_code = 200
+    ready.json.return_value = {"code": 0}
+    mock_http = MagicMock()
+    mock_http.stream.side_effect = _stream
+    mock_http.get.return_value = ready
+    return mock_http
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ReadError("connection reset by peer"),
+        httpx.ReadTimeout("timed out"),
+        httpx.RemoteProtocolError("incomplete chunk"),
+        httpx.ConnectError("no route"),
+    ],
+)
+def test_stream_to_tmp_retries_transient_transport_errors(tmp_path, exc):
+    f = CameraFile(id=1, date="2026-08-23 10:00:00", size=4, type=1)
+    mock_http = _make_stream_client([exc, b"good"])
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        client._stream_to_tmp(f, tmp_path / "x.jpg.part")
+    assert (tmp_path / "x.jpg.part").read_bytes() == b"good"
+    assert mock_http.stream.call_count == 2
+
+
+def test_stream_to_tmp_discards_partial_bytes_between_attempts(tmp_path):
+    """A truncated first attempt must not be prepended to the retry."""
+    f = CameraFile(id=1, date="2026-08-23 10:00:00", size=4, type=1)
+    mock_http = _make_stream_client([httpx.ReadError("reset"), b"good"])
+    tmp = tmp_path / "x.jpg.part"
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        client._stream_to_tmp(f, tmp)
+    assert tmp.read_bytes() == b"good"
+
+
+def test_stream_to_tmp_gives_up_after_repeated_failures(tmp_path):
+    f = CameraFile(id=1, date="2026-08-23 10:00:00", size=4, type=1)
+    resets = [httpx.ReadError("reset")] * 10
+    mock_http = _make_stream_client(resets)
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        with pytest.raises(httpx.ReadError):
+            client._stream_to_tmp(f, tmp_path / "x.jpg.part")
+    assert mock_http.stream.call_count == camera_mod.STREAM_ATTEMPTS
+
+
+def test_stream_to_tmp_does_not_retry_non_transport_errors(tmp_path):
+    """A bug in our own code should surface at once, not be retried four times."""
+    f = CameraFile(id=1, date="2026-08-23 10:00:00", size=4, type=1)
+    mock_http = _make_stream_client([ValueError("boom"), b"good"])
+    with patch("httpx.Client", return_value=mock_http):
+        client = CameraClient()
+        with pytest.raises(ValueError):
+            client._stream_to_tmp(f, tmp_path / "x.jpg.part")
+    assert mock_http.stream.call_count == 1

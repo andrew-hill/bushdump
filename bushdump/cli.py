@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import datetime
 import functools
 import subprocess
@@ -637,11 +638,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
         failed = False
         for cam in cameras:
             try:
-                n, conflicts = _sync_one(
-                    cam, state, args, clock_auto_sync_secs=cfg.clock_auto_sync_secs
-                )
-                total += n
-                all_conflicts.extend(conflicts)
+                result = _sync_one(cam, state, args, clock_auto_sync_secs=cfg.clock_auto_sync_secs)
+                total += result.downloaded
+                all_conflicts.extend(result.conflicts)
+                failed = failed or result.stopped_early
             except KeyboardInterrupt:
                 _out("\nInterrupted — progress saved up to last completed file.", err=True)
                 if all_conflicts:
@@ -650,14 +650,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
             except CameraUnreachable as e:
                 _out(f"  {e}", err=True)
                 failed = True
-            except (
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                httpx.RemoteProtocolError,
-                RuntimeError,
-            ):
-                lines = traceback.format_exc().strip().splitlines()
-                _out("\n".join(lines[-4:]), err=True)
+            except (httpx.TransportError, RuntimeError) as e:
+                # Expected on flaky hardware; the operator is standing in a
+                # paddock, so say what broke rather than how we got here.
+                _out(f"  {cam.name}: {type(e).__name__}: {e}", err=True)
                 failed = True
             except Exception:
                 _out(traceback.format_exc(), err=True)
@@ -679,13 +675,28 @@ def cmd_sync(args: argparse.Namespace) -> int:
         _joined_ap = False
 
 
+@dataclasses.dataclass
+class SyncResult:
+    """What one camera's sync produced.
+
+    `stopped_early` marks a run that gave up part-way — the download it stopped
+    on is still above the watermark, so a later run picks up from there.
+    """
+
+    downloaded: int
+    conflicts: list[str]
+    stopped_early: bool = False
+
+
 def _sync_one(
     cam: config.Camera,
     state: dict,
     args: argparse.Namespace,
     *,
     clock_auto_sync_secs: int = config.DEFAULT_CLOCK_AUTO_SYNC_SECS,
-) -> tuple[int, list[str]]:
+) -> SyncResult:
+    import httpx
+
     from bushdump.camera import CameraClient
 
     _out(f"\n=== {cam.name} ===")
@@ -701,7 +712,7 @@ def _sync_one(
         _out("Waiting for camera to respond...")
         if not client.wait_until_ready():
             _out(f"  {cam.name}: camera did not respond over HTTP — skipping.", err=True)
-            return 0, []
+            return SyncResult(0, [], stopped_early=True)
         _out("Camera ready.")
         _cache_identity(client, cam.name)
         clock_warning = _run_health_checks(
@@ -710,6 +721,7 @@ def _sync_one(
 
         cam_state = state.setdefault(cam.name, {})
         conflicts: list[str] = []
+        stopped_early = False
         last_alive = time.monotonic()
         _out("Listing files...")
 
@@ -748,7 +760,19 @@ def _sync_one(
                     getattr(args, "retry", False)
                     and (cam.output_dir / f.name).with_name(f.name + ".error.txt").exists()
                 )
-                saved = client.download(f, cam.output_dir, retry=is_retry)
+                try:
+                    saved = client.download(f, cam.output_dir, retry=is_retry)
+                except httpx.TransportError as e:
+                    # Never skip: `todo` is oldest-first and the watermark
+                    # advances per file, so the next success would step over
+                    # this one and nothing would ask for it again.
+                    _out(
+                        f"  ! {f.name}: {type(e).__name__} — stopping here. "
+                        f"Re-run to resume from this file.",
+                        err=True,
+                    )
+                    stopped_early = True
+                    break
                 file_elapsed = time.monotonic() - t0
                 done_bytes += f.size
                 if saved is not None:
@@ -781,6 +805,10 @@ def _sync_one(
                 # shouldn't re-check this window.
                 cam_state[media] = f.date
                 config.save_state(state)
+            if stopped_early:
+                # The link is unhealthy — the next media type would only
+                # stop the same way.
+                break
 
         if clock_warning is not None:
             _out("  Clock still out of sync:", err=True)
@@ -789,7 +817,7 @@ def _sync_one(
         if not args.keep_awake:
             client.power_off()
 
-    return downloaded_count, conflicts
+    return SyncResult(downloaded_count, conflicts, stopped_early)
 
 
 _CAMERA_BLE_HINTS = ("cam8z8", "trail cam", "gardepro", "dsoon", "campark")

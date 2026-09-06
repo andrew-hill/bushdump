@@ -167,6 +167,20 @@ no admin needed), the "Could not find network X" error from
       Still to do here: **join first, then probe**, so a command run while
       already on the right camera's AP skips the wake entirely. That is the
       other half of this item and is untouched.
+
+      **The redundant wake+join is not disruptive** (on site, 2026-09-06):
+      `bd stats east` run in a second terminal, while a sync was downloading
+      over east's AP in the first, neither dropped the sync nor stalled it —
+      one file of 858 dipped below 1 MB/s in that run, against 1.9 MB/s
+      average. So `networksetup -setairportnetwork` against the SSID you are
+      already on looks like a no-op rather than a re-association, and this item
+      is a time saving only. Nothing here has to be fixed before a concurrent
+      command is safe.
+
+      An identity check that needs no rejoin, untested: SSIDs carry the WiFi
+      MAC (`CAM8Z8_<mac>`), so `arp -n 192.168.8.1` after joining should
+      name the device with no entitlement involved. Worth one check on site
+      that the gateway MAC really does match the SSID's.
 - [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
       us poll wake state without any WiFi scan. **Writes to the camera**: query
       forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/
