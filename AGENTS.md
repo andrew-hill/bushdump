@@ -94,6 +94,10 @@ Each camera is a `[cameras.<name>]` section (short human name) with its own
 `ble_address` + `ssid`; top-level keys are defaults. Each camera downloads to
 `<output_dir>/<name>/`, with its own per-type watermark in `state.json`.
 
+`ble_address` is a per-host CoreBluetooth id, not the camera's own, so all of
+them go stale at once on a new Mac and `sync` reports no cameras nearby — see
+`ble.py` before debugging the wake path.
+
 ## sync flow
 
 `sync` (no name): BLE-scan for presence → `cameras_present` matches configured

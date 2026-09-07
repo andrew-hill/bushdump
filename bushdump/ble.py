@@ -6,6 +6,11 @@ docs/camera-api.md.
 
 On macOS, BLE peripherals are identified by a CoreBluetooth UUID (not a MAC).
 `discover` lists everything nearby so you can pick yours in `bushdump register`.
+
+That UUID is assigned per host, so a camera enumerates under a different one on
+a different Mac and every stored `ble_address` goes stale at once — `sync` then
+reports no cameras nearby, which reads as range rather than config. Re-register
+after a machine move. An in-place OS upgrade on the same Mac is untested.
 """
 
 from __future__ import annotations
