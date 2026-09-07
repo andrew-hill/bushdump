@@ -57,6 +57,30 @@ mean "already awake" — is refuted, and the `_wake_join` early bail is unblocke
 - [ ] Known-backed-up old file, correct token typed: file disappears from
       `bd ls`, local copy and `state.json` untouched.
 
+### Dropped downloads (new 2026-09-07, never run against hardware)
+
+East reset at file 3 of 1053 and timed out at file 83 of 1052 on 2026-09-06,
+each time abandoning the remaining thousand files. `_stream_to_tmp` now retries
+any `httpx.TransportError` four times. Nothing here has met a real camera.
+
+- [ ] Sync east — the camera that actually drops. A recovered retry prints
+      nothing, so a clean run *is* the pass: compare against the 0.1 MB/s first
+      file and two aborts in `scratch/2026-09-06 bushdump sync log.txt`.
+- [ ] If `! <file>: ReadError — stopping here. Re-run to resume from this file.`
+      appears, four retries were exhausted — a dead link, not a blip. Confirm
+      the re-run resumes at that same file and nothing between it and the
+      previous watermark was skipped.
+- [ ] A stopped run must report the files it did save. The old code printed
+      `Done — 0 new file(s)` after saving 82.
+- [ ] `Already on '<ssid>' — skipping wake+join` should **not** appear on Tahoe.
+      If it does, `networksetup -getairportnetwork` is not redacted after all,
+      the short-circuit works on 26 too, and the "join first, then probe" item
+      below is half solved. Worth one `bd stats <name>` while already on the AP
+      to check deliberately.
+- [ ] While joined, run `arp -n 192.168.8.1` and compare the gateway MAC to the
+      MAC in the SSID — the identity check that would let the short-circuit work
+      under redaction. See the `_wake_join` item under "Code".
+
 ### `bd sync --retry`
 
 - [ ] After a normal sync, manually create a `.error.txt` sidecar for one of the
