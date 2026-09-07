@@ -4,8 +4,9 @@ A registry of the camera models BushDump has been verified against, plus
 models referenced by the upstream reverse-engineering sources that *should*
 work but haven't been confirmed first-hand.
 
-See [`camera-api.md`](camera-api.md) for the protocol details. Update this
-file whenever a new camera is verified.
+See [`camera-api.md`](camera-api.md) for the protocol details and
+[`raw-samples.md`](raw-samples.md) for anonymised raw dumps. Update this file
+whenever a new camera is verified.
 
 ## Confirmation legend
 
@@ -26,7 +27,18 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - WPA2: `1234567890` (factory default — `password: -1` in `/cmd/getSetting`
   means "no user override")
 - Firmware seen: `V6.2.115` (MCU `V213`), BLE module `SL_v0.3.2_2022.09.15`
+- BLE module (from GATT Device Information): Silicon Labs BG22 — manufacturer
+  "Shenzhen RF-star Technology Co., Ltd.", hardware `RF_BM_BG22A1A2`, firmware
+  `V0.3.2_2022.09.15` (matches the `SL_v0.3.2_2022.09.15` string above)
+- **System ID (`00002a23`) carries the WiFi MAC** as EUI-64, so the SSID can be
+  derived over BLE without a WiFi scan — see `camera-api.md` "GATT table"
 - BLE wake char: `6e400004-b5a3-f393-e0a9-e50e24dcca9e`, expects `OK\r\n`
+- **Advertises continuously, including while awake** (2026-08-24): 5/5 BLE finds
+  with the AP down, 5/5 with the AP up, worst case 3.1s against a 20s budget. So
+  "device not found" from `find_device_by_address` is *not* a false negative for
+  an already-woken camera — the radio coming up does not silence the beacon.
+- AP detectable 26.2s after the ack (2026-08-24), matching the ~25s budget in
+  `camera-api.md`.
 - HTTP confirmed: `/cmd/info/1..5`, `/cmd/getSetting`, `/cmd/getParaSetting`,
   `/cmd/standby/reset`, `/list/detail/forward/0/10`
 - `type` enum seen: `1` (photo). No videos on the SD card yet, so `2`
@@ -47,6 +59,10 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - WPA2: `1234567890` ✅
 - `/cmd/info/1`: `{"brand":"GardePro","product":"E8 2.0 Pro","model":"E8V2P","ver":"V9.2.108 MCU V2.67"}`
 - `/cmd/info/5` hardware: `h/w 9.4.9.2S.2`, BLE module `TL_v1.0.5_2025.01.08`
+- BLE module (from GATT Device Information): Telink — manufacturer "Shenzhen
+  Linkiing Technology Co.,Ltd.", hardware `LK8625_V1.6`, firmware `v1.0.5`
+- **System ID (`00002a23`) is zeroed** (`000000fffe000000`) — unlike the E6PMB,
+  the SSID cannot be derived from BLE on this module
 - BLE wake char: `6e400004-b5a3-f393-e0a9-e50e24dcca9e`, same as E6PMB.
   Confirmed `OK\r\n` reply via `--probe-all` (consistent across two separate
   sessions). The CLI sometimes shows "(no ack)" — this is a 3s notification
@@ -54,6 +70,13 @@ shape described in `camera-api.md`. Per-model deviations called out below.
 - **Wake reliability**: BLE `connect()` occasionally times out on the first
   attempt (macOS CoreBluetooth race); a second attempt always succeeds. This
   is a BLE distance/timing issue, not a characteristic mismatch.
+- **Advertises continuously, including while awake** (2026-08-24): 5/5 BLE finds
+  with the AP down, 5/5 with the AP up, worst case 6.1s against a 20s budget —
+  same as the E6PMB despite the different (Linkiing/Telink) module, so this is
+  not vendor-specific. "Device not found" is not a false negative for a camera
+  that is already up.
+- AP detectable 22.3s after a *silent* wake (no ack) on 2026-08-24 — a second
+  observation of the no-ack-but-woke case noted above.
 - HTTP confirmed: `/cmd/info/1..5`, `/cmd/getSetting`, `/cmd/getParaSetting`,
   `/cmd/standby/reset`, `/list/detail/forward/`
 - `/cmd/info/2` field variation: uses `voltage` (0–100 scale) and

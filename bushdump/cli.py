@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import datetime
 import functools
 import subprocess
@@ -16,6 +17,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from enum import Enum
 from typing import IO, TYPE_CHECKING
 
 import argcomplete
@@ -32,6 +34,17 @@ _MEDIA_TYPE_CODE = {"Photo": 1, "Video": 2}
 # Set by cmd_sync before calling into _sync_one/_wake_and_report; reset after.
 _log_file: IO[str] | None = None
 _verbose: bool = False
+# Whether this run actually moved the laptop onto a camera AP. Only then is the
+# closing "rejoin your normal network" notice true — a run that bailed on every
+# camera never left the network it started on, and saying otherwise sends you
+# hunting through WiFi settings for nothing.
+_joined_ap: bool = False
+
+
+def _note_joined_ap() -> None:
+    """Record that we are now on a camera's AP, not the network we started on."""
+    global _joined_ap
+    _joined_ap = True
 
 
 def _out(msg: str = "", *, err: bool = False) -> None:
@@ -247,39 +260,158 @@ def _cache_identity(client: CameraClient, cam_name: str) -> None:
         pass
 
 
+# How long to wait for the AP after a wake the camera did receive, before
+# re-waking. Detection lags a wake by ~25s (26.2s and 22.3s measured 2026-08-24
+# on the two models), so a window shorter than that is guaranteed to come back
+# empty and burn an extra wake — which is exactly what the E8 2.0 Pro hit on
+# every sync, since it never acks and so always took this path.
+_AP_BOOT_CHECK_SECS = 30.0
+
+# How long to spend asking whether the AP is *already* up, when BLE never saw
+# the camera. Nothing was woken, so there is no boot latency to wait out; the
+# only question is whether some earlier wake left the radio on. Long enough for
+# a couple of polls to survive scan throttling, and no longer.
+_AP_ALREADY_UP_SECS = 10.0
+
+
+class CameraUnreachable(RuntimeError):
+    """We established the camera is not there, and stopped early on purpose.
+
+    Distinct from the RuntimeErrors that surface a failure we did not predict:
+    those print a traceback tail because the stack is the diagnosis. Here the
+    message is the entire diagnosis, so printing anything more is noise at
+    someone standing in a paddock.
+    """
+
+
+class WakeOutcome(Enum):
+    """What one BLE wake attempt established.
+
+    Collapsing these into a bool threw away the two most useful facts. ACKED and
+    SENT both mean the camera received the payload — the E8 2.0 Pro never acks
+    and wakes regardless — while NOT_FOUND is the only outcome that says
+    anything definite about the camera being absent.
+    """
+
+    ACKED = "acked"
+    SENT = "sent"
+    NOT_FOUND = "not_found"
+    FAILED = "failed"
+
+
+def _next_wake_action(
+    outcome: WakeOutcome, presence: bool | None, attempt: int, max_attempts: int
+) -> str:
+    """Decide what to do after one BLE wake: "proceed", "rewake" or "bail".
+
+    An ack short-circuits straight to the join. Otherwise we lean on AP
+    presence, which on macOS 26 is three-state: True/False/None, where None
+    means a rate-limited scan couldn't tell us.
+
+    None re-wakes like False does. That is not the "never read None as absent"
+    rule being broken — that rule protects callers who would give up on a live
+    camera. Here the cost of guessing wrong is one extra idempotent wake, so
+    when we can't tell, we wake again.
+
+    "bail" needs two independent negatives agreeing, twice: BLE completed a scan
+    without seeing the camera, *and* a scan for its AP came back definitely
+    absent. Either alone is not enough — BLE could be having a bad moment, and a
+    throttled WiFi scan reports None rather than False — but a camera that is
+    neither advertising nor serving an AP is not there, and grinding through the
+    remaining wakes, the AP wait and the join costs ~208s to learn nothing. We
+    still never bail on the first attempt, so one transient cannot strand a
+    camera that is really present.
+
+    Out of attempts we otherwise proceed anyway: `networksetup` reports "Could
+    not find network" when the AP really is down, so the join is our other
+    oracle.
+    """
+    if outcome is WakeOutcome.ACKED or presence is True:
+        return "proceed"
+    if outcome is WakeOutcome.NOT_FOUND and presence is False and attempt > 1:
+        return "bail"
+    if attempt < max_attempts:
+        return "rewake"
+    return "proceed"
+
+
+def _presence_after_wake(ssid: str, outcome: WakeOutcome) -> bool | None:
+    """Check for the AP, with a window sized to what the wake attempt achieved.
+
+    An ack settles it — don't spend time scanning for what we know is coming.
+    After a wake the camera received, allow for the full ~25s detection lag;
+    checking sooner always reads "absent" during it and burns wake attempts.
+    When BLE never saw the camera nothing was woken, so there is no boot to wait
+    out and the only question is whether the AP is already up.
+    """
+    from bushdump import wifi
+
+    if outcome is WakeOutcome.ACKED:
+        return None
+    window = _AP_ALREADY_UP_SECS if outcome is WakeOutcome.NOT_FOUND else _AP_BOOT_CHECK_SECS
+    return wifi.wait_for_ssid(ssid, timeout=window)
+
+
 def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync).
 
     The camera's BLE wake is flaky: it can silently no-op, leaving the AP off so
-    the join never finds the network. We retry wake+join as a unit — re-waking
-    between tries is what clears most transient failures, so each join gets a
-    shorter timeout and we loop rather than waiting out one long join.
+    the join never finds the network. So the *wake* is what we retry — re-waking
+    is cheap and idempotent, and it clears most transient failures. Once we stop
+    waking we wait for the AP and join once, generously: the join itself is not
+    flaky, it just needs the radio to be up.
+
+    We always join, even if a camera already answers on `camera_host`. Every
+    camera answers on that same address, so reaching *a* camera never proved it
+    was *this* one — joining by SSID does, because SSIDs carry the WiFi MAC and
+    `networksetup` fails outright when the named network isn't there.
+
+    Reading back the SSID we are *already* on identifies a camera by that same
+    argument, so it is the one short-circuit worth keeping. macOS 26 redacts the
+    read, where it costs nothing: the redacted value never matches a configured
+    SSID and we fall through to the full wake+join. On macOS 15 it still fires
+    and saves a BLE wake per command.
     """
     from bushdump import wifi
 
     if cam.ssid and wifi.current_ssid() == cam.ssid:
         _out(f"Already on '{cam.ssid}' — skipping wake+join.")
+        # We are sitting on the camera's AP without having joined it here, and
+        # sync still owes the user the "rejoin your normal network" reminder.
+        _note_joined_ap()
         return
 
     if not cam.ble_address:
         _out("No BLE address configured — skipping wake (turn WiFi on yourself).")
         _out(f"Joining WiFi '{cam.ssid}'...")
         wifi.join(cam.ssid, cam.password)
+        _note_joined_ap()
         return
 
-    last_err: Exception | None = None
     for attempt in range(1, attempts + 1):
-        _wake_and_report(cam.ble_address, cam.name)
-        _out(f"Joining WiFi '{cam.ssid}'...")
-        try:
-            wifi.join(cam.ssid, cam.password, timeout=15.0)
-            return
-        except RuntimeError as e:
-            last_err = e
-            if attempt < attempts:
-                _out(f"  (attempt {attempt}/{attempts} couldn't reach the AP — re-waking)")
-    assert last_err is not None
-    raise last_err
+        outcome = _wake_and_report(cam.ble_address, cam.name)
+        presence = _presence_after_wake(cam.ssid, outcome)
+        action = _next_wake_action(outcome, presence, attempt, attempts)
+        if action == "proceed":
+            break
+        if action == "bail":
+            raise CameraUnreachable(
+                f"{cam.name}: BLE scanned without seeing the camera and its AP "
+                f"{cam.ssid!r} is not in range either — it is asleep or out of range. "
+                "Nothing to join."
+            )
+        _out(f"  (attempt {attempt}/{attempts}: AP not up yet — re-waking)")
+
+    _out(f"Waiting for AP '{cam.ssid}'...")
+    found = wifi.wait_for_ssid(cam.ssid)
+    if found is False:
+        _out("  AP never appeared — trying the join anyway.")
+    elif found is None:
+        _out("  Couldn't tell (macOS hides network names) — trying the join anyway.")
+
+    _out(f"Joining WiFi '{cam.ssid}'...")
+    wifi.join(cam.ssid, cam.password, timeout=45.0)
+    _note_joined_ap()
 
 
 def _resolve_camera(name: str) -> config.Camera | None:
@@ -460,12 +592,13 @@ def cmd_keepalive(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    global _log_file, _verbose
+    global _log_file, _verbose, _joined_ap
     import httpx
 
     from bushdump import ble
 
     _verbose = args.verbose
+    _joined_ap = False
     log = _open_log(args.log)
     _log_file = log
     try:
@@ -518,24 +651,22 @@ def cmd_sync(args: argparse.Namespace) -> int:
         failed = False
         for cam in cameras:
             try:
-                n, conflicts = _sync_one(
-                    cam, state, args, clock_auto_sync_secs=cfg.clock_auto_sync_secs
-                )
-                total += n
-                all_conflicts.extend(conflicts)
+                result = _sync_one(cam, state, args, clock_auto_sync_secs=cfg.clock_auto_sync_secs)
+                total += result.downloaded
+                all_conflicts.extend(result.conflicts)
+                failed = failed or result.stopped_early
             except KeyboardInterrupt:
                 _out("\nInterrupted — progress saved up to last completed file.", err=True)
                 if all_conflicts:
                     _out_conflicts(all_conflicts)
                 return 1
-            except (
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                httpx.RemoteProtocolError,
-                RuntimeError,
-            ):
-                lines = traceback.format_exc().strip().splitlines()
-                _out("\n".join(lines[-4:]), err=True)
+            except CameraUnreachable as e:
+                _out(f"  {e}", err=True)
+                failed = True
+            except (httpx.TransportError, RuntimeError) as e:
+                # Expected on flaky hardware; the operator is standing in a
+                # paddock, so say what broke rather than how we got here.
+                _out(f"  {cam.name}: {type(e).__name__}: {e}", err=True)
                 failed = True
             except Exception:
                 _out(traceback.format_exc(), err=True)
@@ -544,7 +675,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
         _out(f"\nDone — {total} new file(s).")
         if all_conflicts:
             _out_conflicts(all_conflicts)
-        _out("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
+        if _joined_ap:
+            _out("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
         return 1 if failed else 0
     finally:
         if caffeine is not None:
@@ -553,6 +685,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
             log.close()
         _log_file = None
         _verbose = False
+        _joined_ap = False
+
+
+@dataclasses.dataclass
+class SyncResult:
+    """What one camera's sync produced.
+
+    `stopped_early` marks a run that gave up part-way — the download it stopped
+    on is still above the watermark, so a later run picks up from there.
+    """
+
+    downloaded: int
+    conflicts: list[str]
+    stopped_early: bool = False
 
 
 def _sync_one(
@@ -561,13 +707,16 @@ def _sync_one(
     args: argparse.Namespace,
     *,
     clock_auto_sync_secs: int = config.DEFAULT_CLOCK_AUTO_SYNC_SECS,
-) -> tuple[int, list[str]]:
+) -> SyncResult:
+    import httpx
+
     from bushdump.camera import CameraClient
 
     _out(f"\n=== {cam.name} ===")
 
     if args.manual_wifi:
         input(f"Join WiFi '{cam.ssid}' (password: {cam.password}), then press Enter...")
+        _note_joined_ap()
     else:
         _wake_join(cam)
 
@@ -576,7 +725,7 @@ def _sync_one(
         _out("Waiting for camera to respond...")
         if not client.wait_until_ready():
             _out(f"  {cam.name}: camera did not respond over HTTP — skipping.", err=True)
-            return 0, []
+            return SyncResult(0, [], stopped_early=True)
         _out("Camera ready.")
         _cache_identity(client, cam.name)
         clock_warning = _run_health_checks(
@@ -585,6 +734,7 @@ def _sync_one(
 
         cam_state = state.setdefault(cam.name, {})
         conflicts: list[str] = []
+        stopped_early = False
         last_alive = time.monotonic()
         _out("Listing files...")
 
@@ -623,7 +773,19 @@ def _sync_one(
                     getattr(args, "retry", False)
                     and (cam.output_dir / f.name).with_name(f.name + ".error.txt").exists()
                 )
-                saved = client.download(f, cam.output_dir, retry=is_retry)
+                try:
+                    saved = client.download(f, cam.output_dir, retry=is_retry)
+                except httpx.TransportError as e:
+                    # Never skip: `todo` is oldest-first and the watermark
+                    # advances per file, so the next success would step over
+                    # this one and nothing would ask for it again.
+                    _out(
+                        f"  ! {f.name}: {type(e).__name__} — stopping here. "
+                        f"Re-run to resume from this file.",
+                        err=True,
+                    )
+                    stopped_early = True
+                    break
                 file_elapsed = time.monotonic() - t0
                 done_bytes += f.size
                 if saved is not None:
@@ -656,6 +818,10 @@ def _sync_one(
                 # shouldn't re-check this window.
                 cam_state[media] = f.date
                 config.save_state(state)
+            if stopped_early:
+                # The link is unhealthy — the next media type would only
+                # stop the same way.
+                break
 
         if clock_warning is not None:
             _out("  Clock still out of sync:", err=True)
@@ -664,7 +830,7 @@ def _sync_one(
         if not args.keep_awake:
             client.power_off()
 
-    return downloaded_count, conflicts
+    return SyncResult(downloaded_count, conflicts, stopped_early)
 
 
 _CAMERA_BLE_HINTS = ("cam8z8", "trail cam", "gardepro", "dsoon", "campark")
@@ -743,14 +909,20 @@ def cmd_ble(args: argparse.Namespace) -> int:
 def cmd_wifi(args: argparse.Namespace) -> int:
     from bushdump import wifi
 
+    # Bail before the watch window: without the framework every iteration would
+    # re-fail the same import for `timeout` seconds before saying so.
     if not wifi.corewlan_available():
-        print("WiFi scan unavailable — Location permission off?", file=sys.stderr)
+        print(wifi.diagnose_scan(framework=False, seen=None, named=0), file=sys.stderr)
         return 1
+
     timeout = args.timeout if args.timeout is not None else 8.0
     print(f"Watching for WiFi networks for {timeout:.0f}s...")
-    if not wifi.watch_ssids(timeout, _print_wifi_found):
-        print("  (none found)")
-    return 0
+    outcome = wifi.watch_ssids(timeout, _print_wifi_found)
+    if outcome.problem:
+        print(f"  {outcome.problem}", file=sys.stderr)
+    # An empty list is an answer, not a failure: on macOS 26 the names are
+    # redacted and it is the permanent state. Only a scan that never ran fails.
+    return 0 if outcome.scanned else 1
 
 
 def cmd_wake(args: argparse.Namespace) -> int:
@@ -765,15 +937,27 @@ def cmd_wake(args: argparse.Namespace) -> int:
     _wake_and_report(cam.ble_address, cam.name)
     if cam.ssid and wifi.corewlan_available():
         print(f"Waiting for AP '{cam.ssid}' to appear...")
-        if wifi.wait_for_ssid(cam.ssid, 20.0):
+        found = wifi.wait_for_ssid(cam.ssid)
+        if found is True:
             print(f"AP '{cam.ssid}' is up.")
+        elif found is False:
+            print(f"AP '{cam.ssid}' did not appear — try waking again.")
         else:
-            print(f"AP '{cam.ssid}' did not appear within 20s.")
+            # Never spin here: this is what hung at site before.
+            print(f"Couldn't tell whether '{cam.ssid}' is up — macOS hides network names.")
+            print("Try joining it from the WiFi menu, or run `bushdump sync --manual-wifi`.")
     return 0
 
 
-def _wake_and_report(address: str, label: str) -> None:
-    """Wake the camera by address, printing the camera's ack on success."""
+def _wake_and_report(address: str, label: str) -> WakeOutcome:
+    """Wake the camera by address, reporting what the attempt established.
+
+    The ack is one-directional evidence: when it comes back the camera really
+    did accept the wake, but silence proves nothing — cameras frequently wake
+    without acking, so SENT is not a failure. NOT_FOUND is the outcome that
+    carries real information, and it is printed plainly because that is the line
+    you want to read standing in a paddock wondering why nothing happened.
+    """
     from bleak.exc import BleakBluetoothNotAvailableError
 
     from bushdump import ble
@@ -781,20 +965,24 @@ def _wake_and_report(address: str, label: str) -> None:
     _out(f"Waking {label} over BLE to bring its WiFi up...")
     try:
         reply = asyncio.run(ble.wake_wifi(address))
+    except ble.DeviceNotFound:
+        _out("  (BLE scan finished without seeing this camera — asleep, or out of range)")
+        return WakeOutcome.NOT_FOUND
     except BleakBluetoothNotAvailableError:
         _out("  (Bluetooth unavailable — check macOS Privacy & Security settings.)")
-        return
+        return WakeOutcome.FAILED
     except Exception as e:
         _out(f"  (BLE wake failed: {e})")
-        return
+        return WakeOutcome.FAILED
     if reply is None:
-        _out("  (no ack from camera — WiFi may still be coming up)")
-        return
+        _out("  (wake sent, camera did not ack — some models never do, and wake anyway)")
+        return WakeOutcome.SENT
     try:
         text = reply.decode("utf-8").strip()
     except UnicodeDecodeError:
         text = reply.hex()
     _out(f"  camera ack: {text!r}")
+    return WakeOutcome.ACKED
 
 
 def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
@@ -833,13 +1021,10 @@ def _pick_ble_device(timeout: float) -> tuple[str, str | None] | None:
 def _pick_ssid(timeout: float) -> str | None:
     from bushdump import wifi
 
-    if not wifi.corewlan_available():
-        print("\nWiFi scanning unavailable (Location permission off?).")
-        return input("Enter the camera's WiFi SSID manually: ").strip() or None
-
     while True:
         print(f"\nWatching for WiFi networks for {timeout:.0f}s (the AP can take a few seconds)...")
-        ssids = wifi.watch_ssids(timeout, _print_wifi_found)
+        outcome = wifi.watch_ssids(timeout, _print_wifi_found)
+        ssids, problem = outcome.ssids, outcome.problem
         if ssids:
             print("\nNetworks found:")
             for i, ssid in enumerate(ssids):
@@ -847,6 +1032,8 @@ def _pick_ssid(timeout: float) -> str | None:
                 sym = (_mark(True) + "  ") if is_cam else "   "
                 row = f"  {f'[{i}]':<4}  {sym}{ssid}"
                 print(_format_candidate_row(row, is_cam))
+        elif problem:
+            print(f"  {problem}")
         prefix = "Pick a number, " if ssids else ""
         raw = input(f"{prefix}[r] watch again, [m] enter manually, blank to cancel: ")
         choice = raw.strip().lower()

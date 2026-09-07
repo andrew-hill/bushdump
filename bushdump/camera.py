@@ -21,6 +21,12 @@ from bushdump.validate import validate_media
 
 DEFAULT_HOST = "192.168.8.1:8080"
 
+# A download that dies mid-stream is nearly always transient — the camera
+# resets the connection or stalls, and the next attempt sails through. Four
+# tries with a readiness wait between them covers a brief AP blip too.
+STREAM_ATTEMPTS = 4
+STREAM_RETRY_READY_TIMEOUT = 20.0
+
 
 @dataclass(frozen=True, slots=True)
 class CameraFile:
@@ -262,8 +268,8 @@ class CameraClient:
     def list_all_files(self, on_page: Callable[[int], None] | None = None) -> list[CameraFile]:
         """Fetch all files on the camera in one paginated scan.
 
-        Retries each page once on ReadTimeout — the camera's HTTP server
-        occasionally stalls mid-listing on longer card contents.
+        Retries each page once on any transport error — the camera's HTTP server
+        occasionally stalls or resets mid-listing on longer card contents.
 
         on_page, if provided, is called with the running file count after each page.
         """
@@ -276,11 +282,10 @@ class CameraClient:
                 try:
                     resp = self._client.get(f"/list/detail/forward/{from_id}/50")
                     break
-                except httpx.ReadTimeout:
+                except httpx.TransportError:
                     if attempt == 1:
                         raise
-                    self._client.close()
-                    self._client = httpx.Client(base_url=self.base_url, timeout=self._timeout)
+                    self._reconnect()
             resp.raise_for_status()
             page = parse_file_page(resp.json())
             if not page:
@@ -291,11 +296,29 @@ class CameraClient:
             from_id = page[-1].id
         return files
 
-    def _stream_to_tmp(self, file: CameraFile, tmp: Path) -> None:
-        """Stream a file from the camera to tmp. Retries once on RemoteProtocolError."""
+    def _reconnect(self) -> None:
+        """Drop the current connection pool and start a fresh one."""
         import httpx
 
-        for attempt in range(2):
+        self._client.close()
+        self._client = httpx.Client(base_url=self.base_url, timeout=self._timeout)
+
+    def _stream_to_tmp(self, file: CameraFile, tmp: Path) -> None:
+        """Stream a file from the camera to tmp, retrying transient transport errors.
+
+        The camera drops downloads mid-stream — reset by peer, or a stall that
+        times out — and one drop used to abort the rest of the run: only
+        RemoteProtocolError was retried, so a ReadError took the remaining
+        thousand files with it (observed on site 2026-09-06). Every
+        httpx.TransportError is transient as far as we can tell, so reconnect
+        and try again, waiting for the camera in between in case its AP blipped.
+
+        Anything else propagates on the first attempt — a bug in our own code
+        should surface, not be retried four times.
+        """
+        import httpx
+
+        for attempt in range(1, STREAM_ATTEMPTS + 1):
             try:
                 with self._client.stream("GET", f"/file/{file.id}/{file.kind}") as resp:
                     resp.raise_for_status()
@@ -303,12 +326,13 @@ class CameraClient:
                         for chunk in resp.iter_bytes():
                             fh.write(chunk)
                 return
-            except httpx.RemoteProtocolError:
-                if attempt == 1:
+            except httpx.TransportError:
+                if attempt == STREAM_ATTEMPTS:
                     raise
+                # Partial bytes would be prepended to the retry.
                 tmp.unlink(missing_ok=True)
-                self._client.close()
-                self._client = httpx.Client(base_url=self.base_url, timeout=self._timeout)
+                self._reconnect()
+                self.wait_until_ready(timeout=STREAM_RETRY_READY_TIMEOUT)
 
     def download(self, file: CameraFile, dest_dir: Path, *, retry: bool = False) -> Path | None:
         """Stream a file to dest_dir. Returns the saved path, or None if already complete.
@@ -506,9 +530,12 @@ class CameraClient:
         """Turn the camera's WiFi off (saves its battery).
 
         Some models drop the TCP connection before sending an HTTP response;
-        suppress those errors — the command still reached the camera.
+        suppress those errors — the command still reached the camera. The same
+        suppression covers powering off after a run that already gave up on a
+        dead link: this is the last call of the sync, and letting it raise would
+        throw away the count of everything downloaded before the link went.
         """
         import httpx
 
-        with contextlib.suppress(httpx.RemoteProtocolError, httpx.ConnectError):
+        with contextlib.suppress(httpx.TransportError):
             self._client.get("/cmd/standby/now")

@@ -87,8 +87,17 @@ bushdump --help           # all commands and flags
 ```
 
 > **macOS permissions:** the first BLE use prompts for Bluetooth access (approve
-> it). Listing WiFi networks needs Location Services — if it's off, `register`
-> falls back to typing the SSID manually.
+> it). Listing WiFi networks needs Location Services. On macOS 26 the list comes
+> back empty even with Location switched on — the OS no longer tells apps what
+> networks are called — so `register` asks you to type the SSID instead.
+
+> **Moving to a new Mac:** re-run `bushdump register` for each camera. macOS
+> identifies a Bluetooth device by an id it assigns per computer rather than by
+> the device's own address, so the one saved on your old machine matches nothing
+> on the new one, and `bushdump sync` reports that none of your cameras are
+> nearby — it reads as a range problem rather than a config one. `bushdump ble`
+> lists what this machine actually sees. Upgrading macOS in place on the same Mac
+> should keep the saved ids, but that hasn't been tested.
 
 ## Development
 

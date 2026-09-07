@@ -22,6 +22,32 @@ generality. No service to deploy, no multi-tenancy, no scale concerns.
 - **pytest** — tests
 - **ruff** — lint + format (run before every commit)
 
+## Supported macOS versions
+
+**macOS 15 (Sequoia) and 26 (Tahoe) are both supported.** Keep it that way:
+nothing branches on the OS version, and nothing should — every WiFi path decides
+from what CoreWLAN or `networksetup` actually returns, so a machine that can
+read SSIDs gets the fast path and one that can't degrades on its own.
+
+Tahoe redacts SSIDs from any process without Apple's restricted
+`com.apple.developer.networking.wifi-info` entitlement, and that costs us two
+things Sequoia still has:
+
+- **Listing networks.** `bushdump wifi` and `register`'s SSID pick-list come back
+  empty on Tahoe, so you type the SSID in by hand. `ssid_present` works either
+  way — CoreWLAN filters a scan by a name it won't report — so *presence* checks
+  are unaffected.
+- **Skipping a redundant wake.** `_wake_join` short-circuits when
+  `wifi.current_ssid()` already matches the camera's SSID, which identifies the
+  device because SSIDs carry its WiFi MAC. Tahoe redacts that read, the
+  comparison fails, and every `stats`/`ls`/`clock`/`sync` pays a BLE wake and a
+  join it did not need. On Sequoia it fires and saves that.
+
+Neither is a correctness problem, so don't "fix" the redaction path by assuming
+it — the fallbacks have to stay good enough to be the only path. See the macOS 26
+section of `TODO.md` for what is and isn't redacted, and `docs/camera-api.md` for
+the measurements behind the timeouts.
+
 ## Commands
 
 Install once with `uv tool install --editable /path/to/bushdump` — then `bushdump` is on your PATH.
@@ -31,7 +57,7 @@ In the repo, `./bd` is a thin `uv run` wrapper you can use without installing.
 uv sync                                    # install deps into .venv (first-time setup)
 bushdump ble                               # live-list nearby BLE devices
 bushdump wifi                              # live-list WiFi networks
-bushdump wifi <ble-address>                # wake that camera first, then list WiFi (its AP appears)
+bushdump wake <name>                       # wake a configured camera's WiFi over BLE
 bushdump register                          # guided: register a camera (pick from live lists)
 bushdump cameras                           # show configured cameras
 bushdump stats <name>                      # battery, SD usage, file counts
@@ -49,17 +75,17 @@ uv run ruff format .                       # format
 ## Project structure
 
 - `bushdump/ble.py` — BLE: `watch()` (live scan), `discover()` (snapshot), `wake_wifi()`; deps imported lazily
-- `bushdump/wifi.py` — macOS WiFi: list networks via CoreWLAN (`scan_ssids`/`watch_ssids`, Location-gated), join an AP via `networksetup` (no auto-restore)
+- `bushdump/wifi.py` — macOS WiFi: `watch_ssids` lists networks via CoreWLAN, `ssid_present`/`wait_for_ssid` check one AP by name (the only thing that works under macOS 26 SSID redaction), `diagnose_scan` explains an unusable scan; join an AP via `networksetup` (no auto-restore)
 - `bushdump/camera.py` — HTTP client for the Linkiing platform (`/cmd/info/N`, `/list/detail/forward/`, `/file/`); `httpx` imported lazily so pure helpers stay testable without it
 - `bushdump/sync.py` — pure logic: `files_to_download`/`next_watermark` (watermark) and `cameras_present` (match scanned addresses to config)
 - `bushdump/backup.py` — pure backup watermark logic: `date_from_name`, `parse_rsync_pending`, `media_names_of_kind`, `safe_watermark`, `advance_watermark`
 - `bushdump/prune.py` — prune candidate logic: `classify_for_prune`, `scan_local_dir`, `parse_cutoff`; dataclasses `LocalFile`, `PruneVerdict`
 - `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state (`state.json`) + backup watermarks (`backups.json`)
-- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `stats`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`); orchestrates the flows
+- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `wake`, `stats`, `settings`, `clock`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`, `completions`); orchestrates the flows
 - `tests/` — pytest; pure logic only, no real camera/BLE/WiFi needed
 - `docs/camera-api.md` — the reverse-engineered camera API reference
 - `docs/camera-models.md` — registry of which models have been confirmed against `camera-api.md`
-- `tools/` — standalone diagnostic scripts (`inspect-ble`, `wake`, `probe-http`) for adding a new model or stepping through the BLE/WiFi/HTTP flow manually; see `tools/README.md`
+- `tools/` — standalone diagnostic scripts (`inspect-ble`, `wake`, `probe-http`, `probe-ssid-sources`, `probe-wifi-join`, `validate-files`) for adding a new model or stepping through the BLE/WiFi/HTTP flow manually; see `tools/README.md`
 - `scratch/` — gitignored scratch space for logs, terminal output, temp notes, code-review output, etc. Everything inside is ignored. Check here for context notes the user may have left.
 
 ## Multi-camera model
@@ -68,11 +94,16 @@ Each camera is a `[cameras.<name>]` section (short human name) with its own
 `ble_address` + `ssid`; top-level keys are defaults. Each camera downloads to
 `<output_dir>/<name>/`, with its own per-type watermark in `state.json`.
 
+`ble_address` is a per-host CoreBluetooth id, not the camera's own, so all of
+them go stale at once on a new Mac and `sync` reports no cameras nearby — see
+`ble.py` before debugging the wake path.
+
 ## sync flow
 
 `sync` (no name): BLE-scan for presence → `cameras_present` matches configured
 cameras by stored address → sync each. `sync <name>` targets one directly. Per
-camera: BLE wake → join AP (retries until up) → **poll** camera HTTP until ready
+camera: BLE wake → join AP (retries until up, or gives up early when BLE saw no
+camera *and* no AP) → **poll** camera HTTP until ready
 → per media type list+paginate, download files newer than the
 saved watermark → save watermark → power off camera WiFi. We do **not**
 auto-restore your normal WiFi — the laptop stays on the (last) camera's AP; you
@@ -82,14 +113,15 @@ sleeps. `--manual-wifi` swaps BLE+auto-join for a "join the AP, press Enter" pro
 ## ble / wifi / register flow
 
 `ble` (read-only) live-lists BLE devices only. `wifi` (read-only) live-lists
-WiFi networks; pass a BLE address and it wakes that camera first so its AP
-shows up (otherwise the camera AP is off and won't appear). `register` is the
+WiFi networks; it takes no camera argument — use `wake <name>` first if you
+want a camera's AP up, since otherwise it is off and won't appear. `register` is the
 guided setup: it writes the config template if missing, then live-watches BLE →
 pick → BLE-wake → live-watches WiFi (re-scan for the AP-boot delay) → pick SSID
 → password → join + confirm camera (shows `describe()`) → name it to save, or
 bail. Discovery lists *all* nearby devices/networks to pick from (no fragile
 filtering); `rank_ssids` only surfaces likely cameras first. WiFi listing needs
-Location permission; falls back to manual SSID entry otherwise.
+Location permission to scan at all — a separate gate from the name redaction in
+"Supported macOS versions" above, and the one that bites on Sequoia.
 
 ## Code philosophy
 

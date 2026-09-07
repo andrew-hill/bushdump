@@ -6,6 +6,11 @@ docs/camera-api.md.
 
 On macOS, BLE peripherals are identified by a CoreBluetooth UUID (not a MAC).
 `discover` lists everything nearby so you can pick yours in `bushdump register`.
+
+That UUID is assigned per host, so a camera enumerates under a different one on
+a different Mac and every stored `ble_address` goes stale at once — `sync` then
+reports no cameras nearby, which reads as range rather than config. Re-register
+after a machine move. An in-place OS upgrade on the same Mac is untested.
 """
 
 from __future__ import annotations
@@ -51,6 +56,22 @@ async def watch(
     return list(found.items())
 
 
+class DeviceNotFound(RuntimeError):
+    """A BLE scan ran to completion without seeing the device.
+
+    Worth its own type because it is the one wake failure that says something
+    definite: the scan worked, the camera simply was not advertising. Every
+    other failure (connect timeout, write error, Bluetooth off) leaves us not
+    knowing whether the camera heard us. Measured 2026-08-24: cameras advertise
+    continuously whether asleep or awake with their AP up — 10/10 finds in each
+    state on both BLE modules, worst case 6.1s against a 20s budget — so this
+    really does mean absent, not merely quiet.
+
+    Subclasses RuntimeError so it stays a routine camera error to callers that
+    only care that the wake did not happen.
+    """
+
+
 async def wake_wifi(address: str, timeout: float = 20.0) -> bytes | None:
     """Connect to the camera by BLE address and enable its WiFi AP.
 
@@ -64,7 +85,7 @@ async def wake_wifi(address: str, timeout: float = 20.0) -> bytes | None:
     """
     device = await BleakScanner.find_device_by_address(address, timeout=timeout)
     if device is None:
-        raise RuntimeError(f"BLE device {address} not found within {timeout:.0f}s")
+        raise DeviceNotFound(f"BLE device {address} not found within {timeout:.0f}s")
 
     reply: bytes | None = None
     reply_event = asyncio.Event()
