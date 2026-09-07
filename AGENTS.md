@@ -153,6 +153,12 @@ Location permission to scan at all — a separate gate from the name redaction i
   anything with significant blast radius / risk — so it can go through a more
   formal review process. PRs merge with merge commits.
 - When in doubt about which bucket a change falls in, ask.
+- **Attribution: this repo is Claude-permissive.** Commits and PR text carry a
+  `Co-Authored-By:` trailer for whichever assistant did the work. No
+  `Claude-Session:` URL, though — a per-session link is no use to anyone reading
+  the history later, and some existing commits carry one only because they
+  predate this line. This is the repo declaring its own posture, so nothing
+  outside it needs updating to match.
 
 ## ⚠️ Safety rules for agents
 
