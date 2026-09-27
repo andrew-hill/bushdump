@@ -1570,7 +1570,7 @@ def _print_backup_summary(
 def cmd_prune(args: argparse.Namespace) -> int:
     """List or delete old backed-up files from the camera SD card."""
     from bushdump.camera import CameraClient
-    from bushdump.prune import PruneVerdict, classify_for_prune, parse_cutoff, scan_local_dir
+    from bushdump.prune import PruneVerdict, classify_for_prune, cutoffs_by_media, scan_local_dir
 
     cam = _resolve_camera(args.name)
     if cam is None:
@@ -1578,22 +1578,18 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
     cam_backups = config.load_backups().get(args.name, {})
 
-    if args.before is not None:
-        try:
-            cutoff = parse_cutoff(args.before)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-    else:
-        watermarks = [cam_backups[m] for m in args.media if m in cam_backups]
-        if not watermarks:
-            print(
-                "Error: no backup watermark found for this camera — run `bushdump backup` first, "
-                "or pass --before DATE explicitly.",
-                file=sys.stderr,
-            )
-            return 1
-        cutoff = parse_cutoff(min(watermarks))
+    try:
+        cutoffs = cutoffs_by_media(args.media, cam_backups, args.before)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    if not cutoffs:
+        print(
+            "Error: no backup watermark found for this camera — run `bushdump backup` first, "
+            "or pass --before DATE explicitly.",
+            file=sys.stderr,
+        )
+        return 1
 
     _wake_join(cam)
 
@@ -1620,11 +1616,11 @@ def cmd_prune(args: argparse.Namespace) -> int:
         all_verdicts: list[PruneVerdict] = []
         total_deletable = 0
         total_skipped = 0
-        total_outside_range = 0
+        outside_range: dict[str, int] = {}
         total_bytes = 0
         delete_dates: list[str] = []
 
-        for media in args.media:
+        for media, cutoff in cutoffs.items():
             type_code = _MEDIA_TYPE_CODE[media]
             files = [f for f in all_files if f.type == type_code]
             backup_watermark = cam_backups.get(media)
@@ -1637,7 +1633,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
             all_verdicts.extend(verdicts)
             for v in verdicts:
                 if v.file.date >= cutoff:
-                    total_outside_range += 1
+                    outside_range[media] = outside_range.get(media, 0) + 1
                     continue
                 size_kb = v.file.size // 1024
                 if v.deletable:
@@ -1658,7 +1654,13 @@ def cmd_prune(args: argparse.Namespace) -> int:
             f"  in range:      {total_deletable} to delete, {total_skipped} skipped, "
             f"{size_mb:.1f} MB"
         )
-        print(f"  outside range: {total_outside_range} not considered (newer than {cutoff[:10]})")
+        newer_than = ", ".join(
+            f"{outside_range.get(m, 0)} {m} newer than {c[:10]}" for m, c in cutoffs.items()
+        )
+        print(f"  outside range: {newer_than} — not considered")
+        for media in args.media:
+            if media not in cutoffs:
+                print(f"  {media}: no backup watermark yet — not considered")
 
         if not sys.stdin.isatty():
             print("Non-interactive — showing plan only. Run in a terminal to confirm and delete.")

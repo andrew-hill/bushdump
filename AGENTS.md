@@ -79,7 +79,7 @@ uv run ruff format .                       # format
 - `bushdump/camera.py` — HTTP client for the Linkiing platform (`/cmd/info/N`, `/list/detail/forward/`, `/file/`); `httpx` imported lazily so pure helpers stay testable without it
 - `bushdump/sync.py` — pure logic: `files_to_download`/`next_watermark` (watermark) and `cameras_present` (match scanned addresses to config)
 - `bushdump/backup.py` — pure backup watermark logic: `date_from_name`, `parse_rsync_pending`, `media_names_of_kind`, `safe_watermark`, `advance_watermark`
-- `bushdump/prune.py` — prune candidate logic: `classify_for_prune`, `scan_local_dir`, `parse_cutoff`; dataclasses `LocalFile`, `PruneVerdict`
+- `bushdump/prune.py` — prune candidate logic: `classify_for_prune`, `cutoffs_by_media` (per-type cutoff), `scan_local_dir`, `parse_cutoff`; dataclasses `LocalFile`, `PruneVerdict`
 - `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state (`state.json`) + backup watermarks (`backups.json`)
 - `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `wake`, `stats`, `settings`, `clock`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`, `completions`); orchestrates the flows
 - `tests/` — pytest; pure logic only, no real camera/BLE/WiFi needed

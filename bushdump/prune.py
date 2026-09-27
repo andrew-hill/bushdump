@@ -35,6 +35,22 @@ def parse_cutoff(s: str) -> str:
     raise ValueError(f"Cannot parse cutoff date: {s!r}. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.")
 
 
+def cutoffs_by_media(
+    media: Iterable[str], backups: Mapping[str, str], before: str | None
+) -> dict[str, str]:
+    """Prune cutoff for each media type.
+
+    Each type is cut off at its own backup watermark, so a type the camera rarely
+    records (or has stopped recording) can't hold back pruning of the others.
+    `before` overrides the cutoff for every type. Types with no watermark and no
+    `before` are left out — nothing of that type is confirmed backed up.
+    """
+    if before is not None:
+        cutoff = parse_cutoff(before)
+        return {m: cutoff for m in media}
+    return {m: parse_cutoff(backups[m]) for m in media if m in backups}
+
+
 def classify_for_prune(
     camera_files: Iterable[CameraFile],
     *,

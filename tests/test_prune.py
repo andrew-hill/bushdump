@@ -1,7 +1,13 @@
 import pytest
 
 from bushdump.camera import CameraFile
-from bushdump.prune import LocalFile, classify_for_prune, parse_cutoff, scan_local_dir
+from bushdump.prune import (
+    LocalFile,
+    classify_for_prune,
+    cutoffs_by_media,
+    parse_cutoff,
+    scan_local_dir,
+)
 
 
 def _cam_file(
@@ -156,3 +162,28 @@ def test_scan_local_dir_canonical_only(tmp_path):
 
 def test_scan_local_dir_missing(tmp_path):
     assert scan_local_dir(tmp_path / "absent") == {}
+
+
+def test_cutoffs_by_media_each_type_uses_its_own_watermark():
+    backups = {"Photo": "2026-09-22 17:10:02", "Video": "2026-09-06 15:34:36"}
+    assert cutoffs_by_media(["Photo", "Video"], backups, None) == {
+        "Photo": "2026-09-22 17:10:02",
+        "Video": "2026-09-06 15:34:36",
+    }
+
+
+def test_cutoffs_by_media_skips_type_without_watermark():
+    backups = {"Photo": "2026-09-22 16:50:01"}
+    assert cutoffs_by_media(["Photo", "Video"], backups, None) == {"Photo": "2026-09-22 16:50:01"}
+
+
+def test_cutoffs_by_media_only_requested_types():
+    backups = {"Photo": "2026-09-22 16:50:01", "Video": "2026-09-06 15:34:36"}
+    assert cutoffs_by_media(["Photo"], backups, None) == {"Photo": "2026-09-22 16:50:01"}
+
+
+def test_cutoffs_by_media_before_applies_to_every_type():
+    assert cutoffs_by_media(["Photo", "Video"], {}, "2026-09-01") == {
+        "Photo": "2026-09-01 00:00:00",
+        "Video": "2026-09-01 00:00:00",
+    }
