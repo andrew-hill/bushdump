@@ -72,14 +72,29 @@ any `httpx.TransportError` four times. Nothing here has met a real camera.
       previous watermark was skipped.
 - [ ] A stopped run must report the files it did save. The old code printed
       `Done — 0 new file(s)` after saving 82.
-- [ ] `Already on '<ssid>' — skipping wake+join` should **not** appear on Tahoe.
-      If it does, `networksetup -getairportnetwork` is not redacted after all,
-      the short-circuit works on 26 too, and the "join first, then probe" item
-      below is half solved. Worth one `bd stats <name>` while already on the AP
-      to check deliberately.
-- [ ] While joined, run `arp -n 192.168.8.1` and compare the gateway MAC to the
-      MAC in the SSID — the identity check that would let the short-circuit work
-      under redaction. See the `_wake_join` item under "Code".
+
+### Wake/join fast path (new 2026-10-08, never run against hardware)
+
+`_wake_join` now recognises a camera's network by gateway MAC, keeps checking
+through every wait, and lets Enter cut a wait short. None of it has met a camera.
+
+- [ ] While joined, run `arp -n 192.168.8.1` and compare the MAC with the one in
+      the SSID, on both models. If they match, the fast path works from the
+      first run; if not, it only works once `gateway_mac` is in `meta.json`.
+      Either way record the answer in `docs/camera-api.md` ("Whose MAC is it?").
+- [ ] After one normal `bd stats <name>`, `~/.config/bushdump/meta.json` should
+      carry a `gateway_mac` for that camera.
+- [ ] Run `bd stats <name>` again while still on its AP: expect `Already on
+      <name>'s network (gateway MAC matches)` within a second or two, on Tahoe.
+- [ ] Join east's AP by hand, then `bd stats norw`: it must **not** report
+      "already on" — it should wake and join norw.
+- [ ] Start `bd sync <name>` from the home network and let macOS auto-join the
+      AP mid-wake: the wake/scan should be abandoned and the sync start.
+- [ ] Press Enter during the BLE scan, the AP wait and the join in turn. Each
+      should move on at once; a real WiFi scan in flight (~7s) finishes first.
+- [ ] `bd stats <name> --joined` on the right AP, on the wrong camera's AP
+      (must refuse once a MAC is recorded) and on the home network.
+- [ ] `bd prune <name> --joined` must refuse unless the gateway MAC matches.
 
 ### `bd sync --retry`
 
@@ -169,42 +184,24 @@ no admin needed), the "Could not find network X" error from
       `networksetup -listpreferredwirelessnetworks <iface>`, which macOS 26 does
       not redact; `wifi.saved_ssids()` wrapped it but was deleted as dead code,
       so rebuild it here when this lands.
-- [ ] `_wake_join` always wakes+joins now. The old "already reachable, skip
-      wake+join" short-circuit probed `camera_host`, which every camera answers
-      on (`192.168.8.1:8080` for all of them), so it could take camera A for
-      camera B and file A's photos under B. Joining by SSID is what actually
-      identifies a camera. If the extra BLE wake grates on site, reorder rather
-      than restore: join first (identity), then probe, and skip the wake when
-      the camera already answers.
+- [ ] `_wake_join` identifies the camera it is already on by gateway MAC
+      (`wifi.identify`), which no macOS version redacts, and skips the wake+join
+      on a match — at the start and during every wait. Probing `camera_host`
+      alone was never enough: every camera answers on `192.168.8.1:8080`, so it
+      could take camera A for camera B and file A's photos under B. Unverified
+      on hardware; see "Wake/join fast path" under the smoke tests.
 
       **Failed-join cost measured** (off-site, 2026-08-24, stale BLE address so
-      the camera is unreachable): `bd sync <name>` takes **208s** before it
-      gives up — 3×20s BLE scans + 3×15s AP-boot checks + 40s final wait + 45s
-      join. Every BLE attempt returned the conclusive "device not found within
-      20s", and `_wake_and_report` swallows that into a bare `False`, so the
-      full ladder runs for a camera BLE never saw.
+      the camera is unreachable): `bd sync <name>` took **208s** before giving
+      up, and **61s** after the early bail (`_wake_join` gives up when BLE
+      completed a scan without seeing the camera *and* its AP is definitely
+      absent, from the second attempt on).
 
-      **Early bail done 2026-08-24** — `_wake_and_report` now returns a
-      `WakeOutcome`, and `_wake_join` gives up when BLE completed a scan without
-      seeing the camera *and* its AP is definitely absent, from the second
-      attempt on. An out-of-range `bd sync <name>` went 208s → 61s, measured.
-      Still to do here: **join first, then probe**, so a command run while
-      already on the right camera's AP skips the wake entirely. That is the
-      other half of this item and is untouched.
-
-      **The redundant wake+join is not disruptive** (on site, 2026-09-06):
+      **A redundant wake+join is not disruptive** (on site, 2026-09-06):
       `bd stats east` run in a second terminal, while a sync was downloading
-      over east's AP in the first, neither dropped the sync nor stalled it —
-      one file of 858 dipped below 1 MB/s in that run, against 1.9 MB/s
-      average. So `networksetup -setairportnetwork` against the SSID you are
-      already on looks like a no-op rather than a re-association, and this item
-      is a time saving only. Nothing here has to be fixed before a concurrent
-      command is safe.
-
-      An identity check that needs no rejoin, untested: SSIDs carry the WiFi
-      MAC (`CAM8Z8_<mac>`), so `arp -n 192.168.8.1` after joining should
-      name the device with no entitlement involved. Worth one check on site
-      that the gateway MAC really does match the SSID's.
+      over east's AP in the first, neither dropped the sync nor stalled it. So
+      `networksetup -setairportnetwork` against the SSID you are already on
+      looks like a no-op rather than a re-association.
 - [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
       us poll wake state without any WiFi scan. **Writes to the camera**: query
       forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/

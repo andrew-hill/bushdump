@@ -3,10 +3,16 @@ from unittest.mock import patch
 from bushdump.cli import _format_candidate_row, _is_camera_ble, _mark
 from bushdump.wifi import (
     REDACTED_HINT,
+    Identity,
     _seen_from_scan,
     diagnose_scan,
+    identify,
     is_likely_camera_ssid,
+    join,
     join_succeeded,
+    mac_from_ssid,
+    normalize_mac,
+    parse_arp_mac,
     parse_current_ssid,
     parse_wifi_interface,
     rank_ssids,
@@ -286,3 +292,90 @@ def test_parse_current_ssid_redaction_does_not_match_a_real_ssid():
     """
     redacted = parse_current_ssid("Current Wi-Fi Network: <redacted>\n")
     assert redacted != "CAM8Z8_AABBCCDDEEFF"
+
+
+def test_wait_for_ssid_stops_as_soon_as_the_caller_says_so():
+    polls = iter([None, None, None, None])
+    stops = iter([False, True])
+    with (
+        patch("bushdump.wifi.time", _FakeClock()),
+        patch("bushdump.wifi.ssid_present", side_effect=lambda _ssid: next(polls)) as present,
+    ):
+        wait_for_ssid("CAM8Z8_AABBCC112233", timeout=40.0, stop=lambda: next(stops))
+    assert present.call_count == 1
+
+
+def test_join_stops_retrying_when_the_caller_says_so():
+    # networksetup "fails" forever here; without the stop this would raise.
+    failed = type("R", (), {"returncode": 0, "stdout": "Could not find network X.", "stderr": ""})
+    stops = iter([False, True])
+    with (
+        patch("bushdump.wifi.time", _FakeClock()),
+        patch("bushdump.wifi.subprocess.run", return_value=failed) as run,
+    ):
+        joined = join("CAM8Z8_AABBCC112233", "pw", interface="en0", stop=lambda: next(stops))
+    assert joined is False
+    assert run.call_count == 1
+
+
+# --- identifying a camera by its gateway MAC ---
+#
+# SSIDs are redacted on macOS 26 but `arp` is not, and a camera's SSID carries a
+# MAC. Whether that MAC is the gateway's is unverified, hence the learned one.
+
+SSID = "CAM8Z8_A4C10896B3B0"
+SSID_MAC = "a4c10896b3b0"
+
+
+def test_normalize_mac_restores_the_leading_zeros_arp_drops():
+    assert normalize_mac("a4:c1:8:96:b3:b0") == SSID_MAC
+
+
+def test_normalize_mac_accepts_bare_hex_in_any_case():
+    assert normalize_mac("A4C10896B3B0") == SSID_MAC
+
+
+def test_normalize_mac_rejects_things_that_are_not_macs():
+    assert normalize_mac("(incomplete)") is None
+    assert normalize_mac("a4:c1:08:96:b3") is None
+    assert normalize_mac("") is None
+
+
+def test_mac_from_ssid_reads_the_trailing_mac():
+    assert mac_from_ssid(SSID) == SSID_MAC
+
+
+def test_mac_from_ssid_none_for_an_ssid_without_one():
+    assert mac_from_ssid("Trail Cam Pro 1234") is None
+
+
+def test_parse_arp_mac_reads_a_resolved_entry():
+    out = "? (192.168.8.1) at a4:c1:8:96:b3:b0 on en0 ifscope [ethernet]\n"
+    assert parse_arp_mac(out) == SSID_MAC
+
+
+def test_parse_arp_mac_none_while_unresolved_or_absent():
+    assert parse_arp_mac("? (192.168.8.1) at (incomplete) on en0 ifscope [ethernet]\n") is None
+    assert parse_arp_mac("192.168.8.1 (192.168.8.1) -- no entry\n") is None
+
+
+def test_identify_matches_the_mac_in_the_ssid():
+    assert identify(SSID_MAC, SSID, None) is Identity.MATCH
+
+
+def test_identify_matches_a_learned_mac_the_ssid_does_not_predict():
+    assert identify("a4c10896b3b1", SSID, "a4c10896b3b1") is Identity.MATCH
+
+
+def test_identify_mismatch_when_a_learned_mac_says_otherwise():
+    assert identify("385cfb2540d4", SSID, "a4c10896b3b1") is Identity.MISMATCH
+
+
+def test_identify_unknown_when_no_gateway_mac_was_seen():
+    assert identify(None, SSID, SSID_MAC) is Identity.UNKNOWN
+
+
+def test_identify_unknown_when_only_the_unverified_ssid_guess_disagrees():
+    # Nothing learned yet, so a gateway MAC that differs from the SSID's may
+    # just mean the vendor derives the SSID from some other MAC.
+    assert identify("a4c10896b3b1", SSID, None) is Identity.UNKNOWN

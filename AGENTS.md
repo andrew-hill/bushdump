@@ -37,11 +37,13 @@ things Sequoia still has:
   empty on Tahoe, so you type the SSID in by hand. `ssid_present` works either
   way — CoreWLAN filters a scan by a name it won't report — so *presence* checks
   are unaffected.
-- **Skipping a redundant wake.** `_wake_join` short-circuits when
-  `wifi.current_ssid()` already matches the camera's SSID, which identifies the
-  device because SSIDs carry its WiFi MAC. Tahoe redacts that read, the
-  comparison fails, and every `stats`/`ls`/`clock`/`sync` pays a BLE wake and a
-  join it did not need. On Sequoia it fires and saves that.
+- **Skipping a redundant wake by SSID.** `_wake_join` short-circuits when
+  `wifi.current_ssid()` already matches the camera's SSID. Tahoe redacts that
+  read, so there the same job falls to the gateway MAC (`wifi.identify`): `arp`
+  is not redacted, the SSID carries a MAC, and a join by SSID records the
+  gateway's real one in `meta.json`. Whether the SSID's MAC *is* the gateway's
+  is unverified, so on Tahoe the first run against a camera may still pay the
+  full BLE wake and join.
 
 Neither is a correctness problem, so don't "fix" the redaction path by assuming
 it — the fallbacks have to stay good enough to be the only path. See the macOS 26
@@ -65,6 +67,7 @@ bushdump ls <name>                         # preview which files would be downlo
 bushdump sync                              # scan and sync every nearby configured camera
 bushdump sync frontgate                    # sync just one camera
 bushdump sync --manual-wifi                # skip auto WiFi; prompt you to join each AP
+bushdump stats <name> --joined             # already on the camera's WiFi: skip wake+join
 bushdump keepalive <name>                  # keep camera WiFi alive (pings every 10s; Ctrl+C to stop)
 uv run pytest                              # run tests
 uv run pytest tests/test_sync.py -q        # one file
@@ -109,6 +112,12 @@ saved watermark → save watermark → power off camera WiFi. We do **not**
 auto-restore your normal WiFi — the laptop stays on the (last) camera's AP; you
 rejoin your usual network yourself. Races are handled by polling, not fixed
 sleeps. `--manual-wifi` swaps BLE+auto-join for a "join the AP, press Enter" prompt.
+
+The wake+join is skipped whenever we are already on that camera's network — at
+the start, or part-way through if macOS auto-joins while we are still waking.
+Enter cuts the current wait short. `--joined` (any camera command) skips it on
+your say-so, refusing only a gateway known to be another camera's; `prune`
+additionally refuses unless the gateway is positively this camera's.
 
 ## ble / wifi / register flow
 

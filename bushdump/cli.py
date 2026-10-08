@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import datetime
 import functools
+import select
 import subprocess
 import sys
 import threading
@@ -25,7 +27,7 @@ import argcomplete
 from bushdump import __version__, config, sync
 
 if TYPE_CHECKING:
-    from bushdump import health
+    from bushdump import health, wifi
     from bushdump.camera import CameraClient
 
 MEDIA_TYPES = ("Photo", "Video")
@@ -39,6 +41,10 @@ _verbose: bool = False
 # camera never left the network it started on, and saying otherwise sends you
 # hunting through WiFi settings for nothing.
 _joined_ap: bool = False
+# The camera whose AP this run joined *by SSID* — the one way of getting onto a
+# network that proves which camera it is, and so the only time the gateway MAC
+# we see is safe to record against that camera's name.
+_ssid_joined: str | None = None
 
 
 def _note_joined_ap() -> None:
@@ -246,15 +252,25 @@ def cmd_cameras(args: argparse.Namespace) -> int:
 
 
 def _cache_identity(client: CameraClient, cam_name: str) -> None:
-    """Fetch /cmd/info/1 and persist it to meta.json. Best-effort — never raises."""
+    """Fetch /cmd/info/1 and persist it to meta.json. Best-effort — never raises.
+
+    Also records the gateway MAC when this run joined the camera by SSID, which
+    is what lets later runs recognise its network without reading an SSID.
+    """
     import datetime as _dt
+
+    from bushdump import wifi
 
     try:
         ident = client.identity()
-        if not ident:
+        learned = wifi.gateway_mac(client.host) if _ssid_joined == cam_name else None
+        if not ident and not learned:
             return
         meta = config.load_meta()
-        meta[cam_name] = {**ident, "last_seen": _dt.date.today().isoformat()}
+        entry = {**meta.get(cam_name, {}), **ident, "last_seen": _dt.date.today().isoformat()}
+        if learned:
+            entry["gateway_mac"] = learned
+        meta[cam_name] = entry
         config.save_meta(meta)
     except Exception:
         pass
@@ -290,13 +306,15 @@ class WakeOutcome(Enum):
     Collapsing these into a bool threw away the two most useful facts. ACKED and
     SENT both mean the camera received the payload — the E8 2.0 Pro never acks
     and wakes regardless — while NOT_FOUND is the only outcome that says
-    anything definite about the camera being absent.
+    anything definite about the camera being absent. ABANDONED means we
+    stopped the attempt ourselves and learned nothing from it.
     """
 
     ACKED = "acked"
     SENT = "sent"
     NOT_FOUND = "not_found"
     FAILED = "failed"
+    ABANDONED = "abandoned"
 
 
 def _next_wake_action(
@@ -335,7 +353,9 @@ def _next_wake_action(
     return "proceed"
 
 
-def _presence_after_wake(ssid: str, outcome: WakeOutcome) -> bool | None:
+def _presence_after_wake(
+    ssid: str, outcome: WakeOutcome, stop: Callable[[], bool] | None = None
+) -> bool | None:
     """Check for the AP, with a window sized to what the wake attempt achieved.
 
     An ack settles it — don't spend time scanning for what we know is coming.
@@ -349,11 +369,105 @@ def _presence_after_wake(ssid: str, outcome: WakeOutcome) -> bool | None:
     if outcome is WakeOutcome.ACKED:
         return None
     window = _AP_ALREADY_UP_SECS if outcome is WakeOutcome.NOT_FOUND else _AP_BOOT_CHECK_SECS
-    return wifi.wait_for_ssid(ssid, timeout=window)
+    return wifi.wait_for_ssid(ssid, timeout=window, stop=stop)
 
 
-def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
-    """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync).
+def _enter_pressed() -> bool:
+    """Has the user hit Enter since we last looked? Consumes the line if so."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return False
+    if not ready:
+        return False
+    sys.stdin.readline()
+    return True
+
+
+def _camera_identity(cam: config.Camera) -> wifi.Identity:
+    """Is the gateway we can reach right now this camera? See `wifi.identify`."""
+    from bushdump import wifi
+
+    learned = config.load_meta().get(cam.name, {}).get("gateway_mac")
+    return wifi.identify(wifi.gateway_mac(cam.camera_host), cam.ssid, learned)
+
+
+class _WaitWatch:
+    """The two reasons to stop waiting on a camera, as a `stop` callable.
+
+    Either we turn out to be on its AP already — macOS often auto-joins the
+    moment the network comes up, while we are still waking or scanning — or the
+    user pressed Enter because they can see something we can't. `on_ap` sticks;
+    an Enter skips one wait and is then spent.
+    """
+
+    _PROBE_EVERY_SECS = 2.0
+
+    def __init__(self, cam: config.Camera) -> None:
+        self._cam = cam
+        self.on_ap = False
+        self._skipped = False
+        self._next_probe = 0.0
+
+    def __call__(self) -> bool:
+        from bushdump import wifi
+
+        if self.on_ap or self._skipped:
+            return True
+        if _enter_pressed():
+            self._skipped = True
+            _out("  (Enter — skipping this wait)")
+        elif time.monotonic() >= self._next_probe:
+            self.on_ap = _camera_identity(self._cam) is wifi.Identity.MATCH
+            self._next_probe = time.monotonic() + self._PROBE_EVERY_SECS
+        return self.on_ap or self._skipped
+
+    def take_skip(self) -> bool:
+        skipped, self._skipped = self._skipped, False
+        return skipped
+
+
+def _already_on(cam: config.Camera, how: str) -> None:
+    _out(f"Already on {cam.name}'s network ({how}) — skipping wake+join.")
+    # We are sitting on the camera's AP without having joined it here, and
+    # sync still owes the user the "rejoin your normal network" reminder.
+    _note_joined_ap()
+
+
+def _require_joined(cam: config.Camera, *, strict: bool) -> None:
+    """`--joined`: trust the user that we are on the camera's AP, within limits.
+
+    A gateway known to belong to a different camera is refused outright — that
+    is how one camera's photos end up filed under another. When we simply can't
+    tell, the user's word is enough to read from a camera but not (`strict`) to
+    delete from one.
+    """
+    from bushdump import wifi
+
+    identity = _camera_identity(cam)
+    if identity is wifi.Identity.MISMATCH:
+        raise CameraUnreachable(
+            f"{cam.name}: --joined, but this network's gateway is not the one recorded "
+            f"for {cam.name}. Join {cam.ssid!r}, or drop --joined."
+        )
+    if identity is wifi.Identity.MATCH:
+        _already_on(cam, "gateway MAC matches")
+        return
+    if strict:
+        raise CameraUnreachable(
+            f"{cam.name}: --joined, but nothing confirms this network is {cam.name}'s, "
+            "and that is not enough to delete on. Run it without --joined."
+        )
+    _out(f"  (--joined: can't confirm this is {cam.name}'s network — taking your word for it)")
+    _note_joined_ap()
+
+
+def _wake_join(
+    cam: config.Camera, attempts: int = 3, *, joined: bool = False, strict: bool = False
+) -> None:
+    """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync/prune).
 
     The camera's BLE wake is flaky: it can silently no-op, leaving the AP off so
     the join never finds the network. So the *wake* is what we retry — re-waking
@@ -361,56 +475,78 @@ def _wake_join(cam: config.Camera, attempts: int = 3) -> None:
     waking we wait for the AP and join once, generously: the join itself is not
     flaky, it just needs the radio to be up.
 
-    We always join, even if a camera already answers on `camera_host`. Every
-    camera answers on that same address, so reaching *a* camera never proved it
-    was *this* one — joining by SSID does, because SSIDs carry the WiFi MAC and
-    `networksetup` fails outright when the named network isn't there.
+    A camera answering on `camera_host` proves nothing by itself — every camera
+    answers on that same address. What identifies one is its SSID, which carries
+    a MAC: joining by SSID proves it, reading back the SSID we are on proves it
+    (macOS 15 only; 26 redacts the read), and so does the gateway's MAC, which
+    no macOS version hides. Any of those short-circuits the wake+join, and the
+    MAC check keeps running through every wait below, because macOS frequently
+    auto-joins the AP while we are still waking or scanning for it.
 
-    Reading back the SSID we are *already* on identifies a camera by that same
-    argument, so it is the one short-circuit worth keeping. macOS 26 redacts the
-    read, where it costs nothing: the redacted value never matches a configured
-    SSID and we fall through to the full wake+join. On macOS 15 it still fires
-    and saves a BLE wake per command.
+    Every wait can also be cut short with Enter. Skipping the wake goes straight
+    to the join; skipping the join goes straight to the camera, and whichever
+    command called us finds out there whether the skip was right.
     """
+    global _ssid_joined
     from bushdump import wifi
 
-    if cam.ssid and wifi.current_ssid() == cam.ssid:
-        _out(f"Already on '{cam.ssid}' — skipping wake+join.")
-        # We are sitting on the camera's AP without having joined it here, and
-        # sync still owes the user the "rejoin your normal network" reminder.
-        _note_joined_ap()
+    if joined:
+        _require_joined(cam, strict=strict)
         return
+
+    if cam.ssid and wifi.current_ssid() == cam.ssid:
+        _ssid_joined = cam.name
+        _already_on(cam, f"on '{cam.ssid}'")
+        return
+
+    if _camera_identity(cam) is wifi.Identity.MATCH:
+        _already_on(cam, "gateway MAC matches")
+        return
+    watch = _WaitWatch(cam)
 
     if not cam.ble_address:
         _out("No BLE address configured — skipping wake (turn WiFi on yourself).")
-        _out(f"Joining WiFi '{cam.ssid}'...")
-        wifi.join(cam.ssid, cam.password)
-        _note_joined_ap()
-        return
+    else:
+        if sys.stdin.isatty():
+            _out("  (press Enter to skip any wait below)")
+        skipped = False
+        for attempt in range(1, attempts + 1):
+            outcome = _wake_and_report(cam.ble_address, cam.name, stop=watch)
+            presence = None
+            if outcome is not WakeOutcome.ABANDONED:
+                presence = _presence_after_wake(cam.ssid, outcome, stop=watch)
+            if watch.on_ap:
+                _already_on(cam, "gateway MAC matches")
+                return
+            if skipped := watch.take_skip():
+                break
+            action = _next_wake_action(outcome, presence, attempt, attempts)
+            if action == "proceed":
+                break
+            if action == "bail":
+                raise CameraUnreachable(
+                    f"{cam.name}: BLE scanned without seeing the camera and its AP "
+                    f"{cam.ssid!r} is not in range either — it is asleep or out of range. "
+                    "Nothing to join."
+                )
+            _out(f"  (attempt {attempt}/{attempts}: AP not up yet — re-waking)")
 
-    for attempt in range(1, attempts + 1):
-        outcome = _wake_and_report(cam.ble_address, cam.name)
-        presence = _presence_after_wake(cam.ssid, outcome)
-        action = _next_wake_action(outcome, presence, attempt, attempts)
-        if action == "proceed":
-            break
-        if action == "bail":
-            raise CameraUnreachable(
-                f"{cam.name}: BLE scanned without seeing the camera and its AP "
-                f"{cam.ssid!r} is not in range either — it is asleep or out of range. "
-                "Nothing to join."
-            )
-        _out(f"  (attempt {attempt}/{attempts}: AP not up yet — re-waking)")
-
-    _out(f"Waiting for AP '{cam.ssid}'...")
-    found = wifi.wait_for_ssid(cam.ssid)
-    if found is False:
-        _out("  AP never appeared — trying the join anyway.")
-    elif found is None:
-        _out("  Couldn't tell (macOS hides network names) — trying the join anyway.")
+        if not skipped:
+            _out(f"Waiting for AP '{cam.ssid}'...")
+            found = wifi.wait_for_ssid(cam.ssid, stop=watch)
+            if watch.on_ap:
+                _already_on(cam, "gateway MAC matches")
+                return
+            if watch.take_skip():
+                pass
+            elif found is False:
+                _out("  AP never appeared — trying the join anyway.")
+            elif found is None:
+                _out("  Couldn't tell (macOS hides network names) — trying the join anyway.")
 
     _out(f"Joining WiFi '{cam.ssid}'...")
-    wifi.join(cam.ssid, cam.password, timeout=45.0)
+    if wifi.join(cam.ssid, cam.password, timeout=45.0, stop=watch):
+        _ssid_joined = cam.name
     _note_joined_ap()
 
 
@@ -433,7 +569,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     cam = _resolve_camera(args.name)
     if cam is None:
         return 1
-    _wake_join(cam)
+    _wake_join(cam, joined=args.joined)
     with CameraClient(cam.camera_host) as client:
         print("Waiting for camera to respond...")
         if not client.wait_until_ready():
@@ -466,7 +602,7 @@ def cmd_settings(args: argparse.Namespace) -> int:
     cam = _resolve_camera(args.name)
     if cam is None:
         return 1
-    _wake_join(cam)
+    _wake_join(cam, joined=args.joined)
     with CameraClient(cam.camera_host) as client:
         print("Waiting for camera to respond...")
         if not client.wait_until_ready():
@@ -492,7 +628,7 @@ def cmd_clock(args: argparse.Namespace) -> int:
     cam = _resolve_camera(args.name)
     if cam is None:
         return 1
-    _wake_join(cam)
+    _wake_join(cam, joined=args.joined)
     with CameraClient(cam.camera_host) as client:
         print("Waiting for camera to respond...")
         if not client.wait_until_ready():
@@ -533,7 +669,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
     cam = _resolve_camera(args.name)
     if cam is None:
         return 1
-    _wake_join(cam)
+    _wake_join(cam, joined=args.joined)
     with CameraClient(cam.camera_host) as client:
         print("Waiting for camera to respond...")
         if not client.wait_until_ready():
@@ -573,7 +709,7 @@ def cmd_keepalive(args: argparse.Namespace) -> int:
     cam = _resolve_camera(args.name)
     if cam is None:
         return 1
-    _wake_join(cam)
+    _wake_join(cam, joined=args.joined)
     with CameraClient(cam.camera_host) as client:
         print("Waiting for camera to respond...")
         if not client.wait_until_ready():
@@ -596,6 +732,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
     import httpx
 
     from bushdump import ble
+
+    if args.joined and not args.name:
+        _out("--joined needs a camera name: you can only be on one camera's WiFi.", err=True)
+        return 1
 
     _verbose = args.verbose
     _joined_ap = False
@@ -718,7 +858,7 @@ def _sync_one(
         input(f"Join WiFi '{cam.ssid}' (password: {cam.password}), then press Enter...")
         _note_joined_ap()
     else:
-        _wake_join(cam)
+        _wake_join(cam, joined=args.joined)
 
     downloaded_count = 0
     with CameraClient(cam.camera_host) as client:
@@ -949,7 +1089,34 @@ def cmd_wake(args: argparse.Namespace) -> int:
     return 0
 
 
-def _wake_and_report(address: str, label: str) -> WakeOutcome:
+class _WakeAbandoned(Exception):
+    """`stop` fired while a BLE wake was still in flight."""
+
+
+async def _wake_unless(address: str, stop: Callable[[], bool] | None) -> bytes | None:
+    """Run the BLE wake, abandoning it as soon as `stop` says to.
+
+    A scan for a camera BLE can't see runs its full 20s, and that is exactly
+    when the wait is pointless: an earlier wake has usually landed and the AP is
+    already up. `stop` does blocking I/O, so it is polled off the event loop.
+    """
+    from bushdump import ble
+
+    wake = asyncio.ensure_future(ble.wake_wifi(address))
+    while True:
+        done, _ = await asyncio.wait({wake}, timeout=0.5)
+        if done:
+            return wake.result()
+        if stop is not None and await asyncio.to_thread(stop):
+            wake.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await wake
+            raise _WakeAbandoned
+
+
+def _wake_and_report(
+    address: str, label: str, stop: Callable[[], bool] | None = None
+) -> WakeOutcome:
     """Wake the camera by address, reporting what the attempt established.
 
     The ack is one-directional evidence: when it comes back the camera really
@@ -964,7 +1131,9 @@ def _wake_and_report(address: str, label: str) -> WakeOutcome:
 
     _out(f"Waking {label} over BLE to bring its WiFi up...")
     try:
-        reply = asyncio.run(ble.wake_wifi(address))
+        reply = asyncio.run(_wake_unless(address, stop))
+    except _WakeAbandoned:
+        return WakeOutcome.ABANDONED
     except ble.DeviceNotFound:
         _out("  (BLE scan finished without seeing this camera — asleep, or out of range)")
         return WakeOutcome.NOT_FOUND
@@ -1591,7 +1760,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
         )
         return 1
 
-    _wake_join(cam)
+    _wake_join(cam, joined=args.joined, strict=True)
 
     with CameraClient(cam.camera_host) as client:
         print("Waiting for camera to respond...")
@@ -1729,6 +1898,14 @@ def cmd_completions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_joined_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--joined",
+        action="store_true",
+        help="you are already on the camera's WiFi — skip the BLE wake and the join",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bushdump",
@@ -1794,6 +1971,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="show battery, SD usage, and file counts for a camera",
     )
     p_stats.add_argument("name", help="camera name (from `bd cameras`)")
+    _add_joined_flag(p_stats)
     p_stats.set_defaults(func=cmd_stats)
 
     p_settings = sub.add_parser(
@@ -1801,6 +1979,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="show current camera settings (read-only)",
     )
     p_settings.add_argument("name", help="camera name (from `bd cameras`)")
+    _add_joined_flag(p_settings)
     p_settings.set_defaults(func=cmd_settings)
 
     p_clock = sub.add_parser(
@@ -1808,6 +1987,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="show raw camera clock response; optionally sync to UTC",
     )
     p_clock.add_argument("name", help="camera name (from `bd cameras`)")
+    _add_joined_flag(p_clock)
     p_clock.add_argument(
         "--sync",
         action="store_true",
@@ -1817,6 +1997,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ls = sub.add_parser("ls", help="list files on the camera (* = would be downloaded)")
     p_ls.add_argument("name", help="camera name (from `bd cameras`)")
+    _add_joined_flag(p_ls)
     p_ls.set_defaults(func=cmd_ls)
 
     p_keepalive = sub.add_parser(
@@ -1825,6 +2006,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="keep the camera's WiFi alive (Ctrl+C to stop)",
     )
     p_keepalive.add_argument("name", help="camera name (from `bd cameras`)")
+    _add_joined_flag(p_keepalive)
     p_keepalive.add_argument(
         "--interval",
         type=float,
@@ -1844,6 +2026,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sync = sub.add_parser("sync", aliases=["s"], help="download new files from nearby cameras")
     p_sync.add_argument("name", nargs="?", help="sync only this camera (default: all nearby)")
+    _add_joined_flag(p_sync)
     p_sync.add_argument(
         "--manual-wifi",
         action="store_true",
@@ -1931,6 +2114,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete old backed-up files from the camera SD card (shows plan, then prompts)",
     )
     p_prune.add_argument("name", help="camera name (from `bd cameras`)")
+    _add_joined_flag(p_prune)
     p_prune.add_argument(
         "--before",
         default=None,

@@ -15,10 +15,13 @@ done.
 
 from __future__ import annotations
 
+import re
+import socket
 import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 
 # --- listing networks (CoreWLAN) -------------------------------------------
 
@@ -215,7 +218,25 @@ def watch_ssids(
     )
 
 
-def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bool | None:
+def _sleep_unless(stop: Callable[[], bool] | None, seconds: float, step: float = 0.5) -> bool:
+    """Sleep for `seconds`, checking `stop` every `step`. True if it cut the sleep short."""
+    if stop is None:
+        time.sleep(seconds)
+        return False
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        if stop():
+            return True
+        time.sleep(min(step, remaining))
+    return False
+
+
+def wait_for_ssid(
+    ssid: str,
+    timeout: float = 40.0,
+    interval: float = 3.0,
+    stop: Callable[[], bool] | None = None,
+) -> bool | None:
     """Poll until `ssid` is in range. True / False / None ("couldn't tell").
 
     The old version listed every SSID and looked for a match, which on macOS 26
@@ -231,6 +252,10 @@ def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bo
     — so treating "we saw an unknown at some point" as the verdict discarded
     every definite answer that came with it, and this returned "couldn't tell"
     for a camera it had confirmed absent three times over.
+
+    `stop` ends the wait early with whatever verdict the polls so far support.
+    It is checked between scans, not during one, so a real ~7s scan still runs
+    to completion before the wait gives way.
     """
     deadline = time.monotonic() + timeout
     answered = False
@@ -240,9 +265,8 @@ def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bo
             return True
         if present is False:
             answered = True
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline or _sleep_unless(stop, interval):
             return False if answered else None
-        time.sleep(interval)
 
 
 # --- joining / leaving an AP (networksetup) --------------------------------
@@ -324,8 +348,13 @@ def join(
     interface: str | None = None,
     timeout: float = 30.0,
     interval: float = 2.0,
-) -> None:
-    """Join the AP, retrying until success or `timeout` (handles the AP-boot race)."""
+    stop: Callable[[], bool] | None = None,
+) -> bool:
+    """Join the AP, retrying until success or `timeout` (handles the AP-boot race).
+
+    True once joined. False when `stop` ended the retries first — the caller
+    asked us to give up waiting, so that is not an error here.
+    """
     iface = interface or find_wifi_interface()
     deadline = time.monotonic() + timeout
     last_err = ""
@@ -336,7 +365,89 @@ def join(
             text=True,
         )
         if join_succeeded(result.returncode, result.stdout):
-            return
+            return True
         last_err = (result.stdout + result.stderr).strip()
-        time.sleep(interval)
+        if _sleep_unless(stop, interval):
+            return False
     raise RuntimeError(f"Failed to join {ssid!r} within {timeout:.0f}s: {last_err}")
+
+
+# --- identifying the camera we are joined to (arp) --------------------------
+#
+# macOS 26 will not say which SSID we are on, but the ARP table is not redacted
+# and a camera's SSID carries a MAC (`CAM8Z8_<mac>`). So the gateway's MAC can
+# name the camera where the SSID read cannot.
+
+
+class Identity(Enum):
+    """Whether the gateway we can reach is the camera we mean."""
+
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    UNKNOWN = "unknown"
+
+
+def normalize_mac(text: str) -> str | None:
+    """Twelve lowercase hex digits, or None. `arp` drops each octet's leading zero."""
+    octets = text.strip().split(":")
+    if len(octets) == 1:
+        bare = octets[0].lower()
+        return bare if re.fullmatch(r"[0-9a-f]{12}", bare) else None
+    if len(octets) != 6 or not all(re.fullmatch(r"[0-9a-fA-F]{1,2}", o) for o in octets):
+        return None
+    return "".join(o.zfill(2) for o in octets).lower()
+
+
+def mac_from_ssid(ssid: str) -> str | None:
+    """The MAC a camera SSID ends in (`CAM8Z8_<mac>`), or None."""
+    return normalize_mac(ssid.rpartition("_")[2])
+
+
+def parse_arp_mac(stdout: str) -> str | None:
+    """Pull the MAC out of `arp -n <ip>` output; None when unresolved or absent."""
+    match = re.search(r"\bat (\S+)", stdout)
+    return normalize_mac(match.group(1)) if match else None
+
+
+def identify(seen: str | None, ssid: str, learned: str | None) -> Identity:
+    """Is the gateway MAC we `seen` this camera's?
+
+    The MAC in the SSID is a guess — nobody has confirmed it is the gateway's
+    rather than, say, the BLE module's — so agreeing with it is proof but
+    disagreeing with it is not. Only a MAC `learned` from an earlier join by
+    SSID can say MISMATCH.
+    """
+    if seen is None:
+        return Identity.UNKNOWN
+    if seen in (mac_from_ssid(ssid), learned):
+        return Identity.MATCH
+    return Identity.MISMATCH if learned else Identity.UNKNOWN
+
+
+def reachable(host: str, timeout: float = 0.5) -> bool:
+    """Does `host` ("ip:port") accept a TCP connection right now?"""
+    ip, _, port = host.partition(":")
+    try:
+        with socket.create_connection((ip, int(port or 80)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def gateway_mac(host: str) -> str | None:
+    """The MAC behind `host` ("ip:port"), if it is on-link and answering.
+
+    The connection comes first on purpose: it forces a fresh ARP exchange, so a
+    stale entry left over from the last camera's AP cannot answer for this one.
+    Off the camera's AP the address is routed rather than on-link, has no ARP
+    entry, and this is None.
+    """
+    if not reachable(host):
+        return None
+    try:
+        result = subprocess.run(
+            ["arp", "-n", host.partition(":")[0]], capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    return parse_arp_mac(result.stdout)

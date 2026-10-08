@@ -1,8 +1,10 @@
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
-from bushdump import cli
+from bushdump import cli, config, wifi
 from bushdump.camera import CameraFile, CameraStats
 
 
@@ -357,7 +359,7 @@ def test_wake_action_does_not_bail_on_a_generic_wake_failure():
 def _window_used(outcome) -> float | None:
     seen: dict[str, float] = {}
 
-    def fake_wait(ssid, timeout=40.0, interval=3.0):
+    def fake_wait(ssid, timeout=40.0, interval=3.0, stop=None):
         seen["timeout"] = timeout
         return False
 
@@ -547,6 +549,7 @@ def test_wake_join_proceeds_when_ssid_is_redacted(capsys):
     cam = _ap_camera()
     with (
         patch("bushdump.wifi.current_ssid", return_value="<redacted>"),
+        patch("bushdump.cli._camera_identity", return_value=wifi.Identity.UNKNOWN),
         patch("bushdump.wifi.join") as join,
         patch("bushdump.wifi.wait_for_ssid", return_value=True),
         patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
@@ -560,6 +563,7 @@ def test_wake_join_proceeds_when_on_a_different_ssid():
     cam = _ap_camera()
     with (
         patch("bushdump.wifi.current_ssid", return_value="CAM8Z8_112233445566"),
+        patch("bushdump.cli._camera_identity", return_value=wifi.Identity.UNKNOWN),
         patch("bushdump.wifi.join") as join,
         patch("bushdump.wifi.wait_for_ssid", return_value=True),
         patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
@@ -567,3 +571,115 @@ def test_wake_join_proceeds_when_on_a_different_ssid():
         cli._wake_join(cam)
 
     join.assert_called_once()
+
+
+# --- skipping the wake+join when we are already on the camera's network -----
+#
+# SSIDs are unreadable on macOS 26, so "already there" is decided by the
+# gateway MAC instead (`wifi.identify`). These pin down what each verdict is
+# allowed to skip.
+
+
+def _cam(ble_address: str | None = "AAAA-BBBB") -> config.Camera:
+    return config.Camera(
+        name="gate",
+        ssid="CAM8Z8_A4C10896B3B0",
+        password="pw",
+        camera_host="192.168.8.1:8080",
+        output_dir=Path("/nonexistent"),
+        ble_address=ble_address,
+    )
+
+
+def _wake_join_with(identities, *, enter=False, wake=None, **kwargs):
+    """Run _wake_join with every radio faked; return the (wake, wait, join) mocks."""
+    wake_mock = MagicMock(side_effect=wake or (lambda *a, **k: cli.WakeOutcome.SENT))
+    with (
+        patch("bushdump.cli._camera_identity", side_effect=identities),
+        patch("bushdump.cli._enter_pressed", return_value=enter),
+        patch("bushdump.cli._wake_and_report", wake_mock),
+        patch("bushdump.wifi.current_ssid", return_value=None),
+        patch("bushdump.wifi.wait_for_ssid", return_value=True) as wait,
+        patch("bushdump.wifi.join", return_value=True) as join,
+    ):
+        cli._wake_join(_cam(), **kwargs)
+    return wake_mock, wait, join
+
+
+def _calls_stop(*_args, stop, **_kwargs):
+    stop()
+    return cli.WakeOutcome.ABANDONED
+
+
+def test_wake_join_does_nothing_when_the_gateway_is_already_this_camera():
+    wake, _wait, join = _wake_join_with([wifi.Identity.MATCH])
+    wake.assert_not_called()
+    join.assert_not_called()
+
+
+def test_wake_join_stops_once_macos_auto_joins_mid_wake():
+    wake, wait, join = _wake_join_with(
+        [wifi.Identity.UNKNOWN, wifi.Identity.MATCH], wake=_calls_stop
+    )
+    assert wake.call_count == 1
+    wait.assert_not_called()
+    join.assert_not_called()
+
+
+def test_enter_during_the_wake_goes_straight_to_the_join():
+    wake, wait, join = _wake_join_with([wifi.Identity.UNKNOWN] * 9, enter=True, wake=_calls_stop)
+    assert wake.call_count == 1
+    wait.assert_not_called()
+    assert join.call_count == 1
+
+
+def test_joined_flag_skips_the_wake_when_the_gateway_matches():
+    wake, _wait, join = _wake_join_with([wifi.Identity.MATCH], joined=True)
+    wake.assert_not_called()
+    join.assert_not_called()
+
+
+def test_joined_flag_refuses_a_network_known_to_be_another_camera():
+    with pytest.raises(cli.CameraUnreachable):
+        _wake_join_with([wifi.Identity.MISMATCH], joined=True)
+
+
+def test_joined_flag_takes_your_word_when_it_cannot_tell():
+    wake, _wait, join = _wake_join_with([wifi.Identity.UNKNOWN], joined=True)
+    wake.assert_not_called()
+    join.assert_not_called()
+
+
+def test_joined_flag_will_not_take_your_word_for_a_prune():
+    with pytest.raises(cli.CameraUnreachable):
+        _wake_join_with([wifi.Identity.UNKNOWN], joined=True, strict=True)
+
+
+def test_one_enter_skips_one_wait_only():
+    with (
+        patch("bushdump.cli._camera_identity", return_value=wifi.Identity.UNKNOWN),
+        patch("bushdump.cli._enter_pressed", side_effect=[True, False]),
+    ):
+        watch = cli._WaitWatch(_cam())
+        assert watch() is True
+        assert watch.take_skip() is True
+        assert watch() is False
+
+
+def test_prune_passes_joined_as_strict():
+    args = cli.build_parser().parse_args(["prune", "gate", "--joined"])
+    with (
+        patch("bushdump.cli._resolve_camera", return_value=_cam()),
+        patch(
+            "bushdump.config.load_backups", return_value={"gate": {"Photo": "2026-01-01 00:00:00"}}
+        ),
+        patch("bushdump.cli._wake_join", side_effect=cli.CameraUnreachable("stop here")) as wj,
+    ):
+        assert args.func(args) == 1
+    wj.assert_called_once_with(_cam(), joined=True, strict=True)
+
+
+def test_sync_joined_needs_a_camera_name(capsys):
+    args = cli.build_parser().parse_args(["sync", "--joined"])
+    assert args.func(args) == 1
+    assert "--joined" in capsys.readouterr().err
