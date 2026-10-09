@@ -92,6 +92,9 @@ With `BushDumpWiFiHelper` installed (`bd helper status` says "working"):
 - [ ] Start `bd sync <name>` from the home network and let macOS auto-join the
       AP mid-wake: the wake/scan should be abandoned and the sync start.
 - [ ] `bd wifi` after `bd wake <name>` should list the camera's SSID.
+- [ ] While on one camera's AP, plain `bd sync`: expect `Already on <name>'s
+      network — starting there`, that camera synced before any BLE scan, then
+      the scan and the other camera.
 - [ ] `bd stats <name> --joined` on the right AP, on the other camera's AP and
       on the home network (the last two must refuse).
 - [ ] `bd prune <name> --joined` must refuse unless on that camera's AP.

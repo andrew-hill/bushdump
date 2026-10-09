@@ -835,3 +835,68 @@ def test_wake_join_remembers_the_profile_on_both_ways_onto_the_network():
         _wake_join_with([wifi.Identity.MATCH])
         _wake_join_with([wifi.Identity.UNKNOWN] * 9)
     assert remember.call_count == 2
+
+
+# --- sync with no name: start with the camera whose network we are on -------
+
+
+def _two_cameras() -> dict[str, config.Camera]:
+    east = dataclasses.replace(_cam("EAST-ADDR"), name="east", ssid="CAM8Z8_AAAAAAAAAAAA")
+    norw = dataclasses.replace(_cam("NORW-ADDR"), name="norw", ssid="CAM8Z8_BBBBBBBBBBBB")
+    return {"east": east, "norw": norw}
+
+
+def test_current_camera_is_the_one_whose_network_we_are_on():
+    cams = _two_cameras()
+    on_norw = wifi.Observed(helper=helper.Reply(authorized=True, ssid=cams["norw"].ssid))
+    with patch("bushdump.wifi.observe", return_value=on_norw) as observe:
+        assert cli._current_camera(cams.values()) is cams["norw"]
+    observe.assert_called_once()
+
+
+def test_current_camera_none_on_some_other_network():
+    on_home = wifi.Observed(helper=helper.Reply(authorized=True, ssid="G"))
+    with patch("bushdump.wifi.observe", return_value=on_home):
+        assert cli._current_camera(_two_cameras().values()) is None
+
+
+def _sync_order(current, found_addresses):
+    """Drain _cameras_in_sync_order; return (names in order, events in order)."""
+    cams = _two_cameras()
+    events: list[str] = []
+
+    async def discover(timeout):
+        events.append("ble-scan")
+        return [(addr, None) for addr in found_addresses]
+
+    names = []
+    with (
+        patch("bushdump.cli._current_camera", return_value=cams.get(current)),
+        patch("bushdump.ble.discover", discover),
+    ):
+        for cam in cli._cameras_in_sync_order(cams, scan_timeout=1.0):
+            names.append(cam.name)
+            events.append(cam.name)
+    return names, events
+
+
+def test_sync_starts_with_the_current_camera_before_any_ble_scan():
+    names, events = _sync_order("norw", ["EAST-ADDR", "NORW-ADDR"])
+    assert names == ["norw", "east"]
+    assert events == ["norw", "ble-scan", "east"]
+
+
+def test_sync_still_syncs_the_current_camera_when_ble_finds_nothing():
+    names, _ = _sync_order("norw", [])
+    assert names == ["norw"]
+
+
+def test_sync_scans_first_when_we_are_on_no_cameras_network():
+    names, events = _sync_order(None, ["EAST-ADDR", "NORW-ADDR"])
+    assert names == ["east", "norw"]
+    assert events[0] == "ble-scan"
+
+
+def test_sync_has_nothing_to_do_when_no_camera_is_current_or_nearby():
+    with pytest.raises(cli.NoCamerasToSync):
+        _sync_order(None, [])

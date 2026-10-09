@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from enum import Enum
 from typing import IO, TYPE_CHECKING
 
@@ -833,11 +833,60 @@ def cmd_keepalive(args: argparse.Namespace) -> int:
     return 0
 
 
+class NoCamerasToSync(RuntimeError):
+    """`sync` with no name found no camera to work on; the message says why."""
+
+
+def _current_camera(cameras: Iterable[config.Camera]) -> config.Camera | None:
+    """The configured camera whose network we are on right now, if any."""
+    from bushdump import wifi
+
+    seen = wifi.observe()
+    return next(
+        (c for c in cameras if wifi.identify(c.ssid, c.profile_id, seen) is wifi.Identity.MATCH),
+        None,
+    )
+
+
+def _cameras_in_sync_order(
+    cameras: dict[str, config.Camera], scan_timeout: float
+) -> Iterator[config.Camera]:
+    """The cameras a nameless `sync` should work through, found as it goes.
+
+    The one whose network we are already on comes first and needs no BLE to
+    find — it is demonstrably here, and its AP may be on a timer. Only once it
+    is done do we scan for the rest, so that scan costs it nothing.
+    """
+    from bleak.exc import BleakBluetoothNotAvailableError
+
+    from bushdump import ble
+
+    current = _current_camera(cameras.values())
+    if current is not None:
+        _out(f"Already on {current.name}'s network — starting there.")
+        yield current
+
+    _out("Scanning for nearby cameras...")
+    try:
+        present = {addr for addr, _ in asyncio.run(ble.discover(timeout=scan_timeout))}
+    except BleakBluetoothNotAvailableError:
+        if current is not None:
+            _out("Bluetooth unavailable — not looking for other cameras.", err=True)
+            return
+        raise NoCamerasToSync(
+            "Bluetooth unavailable — use --manual-wifi to sync without BLE."
+        ) from None
+    nearby = [c for c in sync.cameras_present(cameras.values(), present) if c is not current]
+    if nearby:
+        _out(f"Found nearby: {', '.join(c.name for c in nearby)}")
+    elif current is None:
+        raise NoCamerasToSync(f"None of your cameras are nearby. Configured: {', '.join(cameras)}")
+    yield from nearby
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     global _log_file, _verbose, _joined_ap
     import httpx
-
-    from bushdump import ble
 
     if args.joined and not args.name:
         _out("--joined needs a camera name: you can only be on one camera's WiFi.", err=True)
@@ -874,49 +923,40 @@ def cmd_sync(args: argparse.Namespace) -> int:
             cameras = list(cfg.cameras.values())
             _out(f"Manual WiFi mode — will prompt for: {', '.join(c.name for c in cameras)}")
         else:
-            from bleak.exc import BleakBluetoothNotAvailableError
-
-            _out("Scanning for nearby cameras...")
-            try:
-                present = {addr for addr, _ in asyncio.run(ble.discover(timeout=args.scan_timeout))}
-            except BleakBluetoothNotAvailableError:
-                _out(
-                    "Bluetooth unavailable — use --manual-wifi to sync without BLE.",
-                    err=True,
-                )
-                return 1
-            cameras = sync.cameras_present(cfg.cameras.values(), present)
-            if not cameras:
-                _out(f"None of your cameras are nearby. Configured: {', '.join(cfg.cameras)}")
-                return 1
-            _out(f"Found nearby: {', '.join(c.name for c in cameras)}")
+            cameras = _cameras_in_sync_order(cfg.cameras, args.scan_timeout)
 
         state = config.load_state()
         total = 0
         all_conflicts: list[str] = []
         failed = False
-        for cam in cameras:
-            try:
-                result = _sync_one(cam, state, args, clock_auto_sync_secs=cfg.clock_auto_sync_secs)
-                total += result.downloaded
-                all_conflicts.extend(result.conflicts)
-                failed = failed or result.stopped_early
-            except KeyboardInterrupt:
-                _out("\nInterrupted — progress saved up to last completed file.", err=True)
-                if all_conflicts:
-                    _out_conflicts(all_conflicts)
-                return 1
-            except CameraUnreachable as e:
-                _out(f"  {e}", err=True)
-                failed = True
-            except (httpx.TransportError, RuntimeError) as e:
-                # Expected on flaky hardware; the operator is standing in a
-                # paddock, so say what broke rather than how we got here.
-                _out(f"  {cam.name}: {type(e).__name__}: {e}", err=True)
-                failed = True
-            except Exception:
-                _out(traceback.format_exc(), err=True)
-                failed = True
+        try:
+            for cam in cameras:
+                try:
+                    result = _sync_one(
+                        cam, state, args, clock_auto_sync_secs=cfg.clock_auto_sync_secs
+                    )
+                    total += result.downloaded
+                    all_conflicts.extend(result.conflicts)
+                    failed = failed or result.stopped_early
+                except KeyboardInterrupt:
+                    _out("\nInterrupted — progress saved up to last completed file.", err=True)
+                    if all_conflicts:
+                        _out_conflicts(all_conflicts)
+                    return 1
+                except CameraUnreachable as e:
+                    _out(f"  {e}", err=True)
+                    failed = True
+                except (httpx.TransportError, RuntimeError) as e:
+                    # Expected on flaky hardware; the operator is standing in a
+                    # paddock, so say what broke rather than how we got here.
+                    _out(f"  {cam.name}: {type(e).__name__}: {e}", err=True)
+                    failed = True
+                except Exception:
+                    _out(traceback.format_exc(), err=True)
+                    failed = True
+        except NoCamerasToSync as e:
+            _out(str(e), err=True)
+            return 1
 
         _out(f"\nDone — {total} new file(s).")
         if all_conflicts:

@@ -117,8 +117,9 @@ them go stale at once on a new Mac and `sync` reports no cameras nearby — see
 
 ## sync flow
 
-`sync` (no name): BLE-scan for presence → `cameras_present` matches configured
-cameras by stored address → sync each. `sync <name>` targets one directly. Per
+`sync` (no name): the camera whose network we are already on, if any, is synced
+first with no BLE at all → then BLE-scan for presence → `cameras_present`
+matches configured cameras by stored address → sync each of the rest. `sync <name>` targets one directly. Per
 camera: BLE wake → join AP (retries until up, or gives up early when BLE saw no
 camera *and* no AP) → **poll** camera HTTP until ready
 → per media type list+paginate, download files newer than the
