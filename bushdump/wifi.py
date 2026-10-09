@@ -372,35 +372,55 @@ def join(
     raise RuntimeError(f"Failed to join {ssid!r} within {timeout:.0f}s: {last_err}")
 
 
-# --- identifying the camera we are joined to (arp) --------------------------
+# --- identifying the network we are joined to -------------------------------
 #
-# macOS 26 will not say which SSID we are on, but the ARP table is not redacted
-# and a camera's SSID carries a MAC (`CAM8Z8_<mac>`). So the gateway's MAC can
-# name the camera where the SSID read cannot.
+# What macOS will tell an unentitled process about its own WiFi network shrinks
+# every release: 26 redacts the SSID, 27 also empties the ARP table and blanks
+# every MAC. Two things identify a network anyway, and we use whichever the
+# running OS still hands over:
+#
+# - the gateway's MAC, from `arp` (gone on 27);
+# - the `ProfileID` in the dynamic store, a token macOS keeps per saved network
+#   (measured on 27.0.1: constant across rejoins, different per network).
+#
+# Neither can be predicted from an SSID, so both are only ever compared against
+# values recorded while joined to the camera *by SSID* — the one moment its
+# identity is proven. Nothing here guesses.
 
 
 class Identity(Enum):
-    """Whether the gateway we can reach is the camera we mean."""
+    """Whether the network we are on is the one recorded for a camera."""
 
     MATCH = "match"
     MISMATCH = "mismatch"
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True, slots=True)
+class NetworkId:
+    """What we could read about a WiFi network; None for what the OS withheld."""
+
+    profile_id: str | None = None
+    gateway_mac: str | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.profile_id or self.gateway_mac)
+
+    def describe(self) -> str:
+        parts = []
+        if self.profile_id:
+            parts.append(f"profile {self.profile_id[:8]}…")
+        if self.gateway_mac:
+            parts.append(f"gateway MAC {self.gateway_mac}")
+        return ", ".join(parts) or "nothing readable"
+
+
 def normalize_mac(text: str) -> str | None:
     """Twelve lowercase hex digits, or None. `arp` drops each octet's leading zero."""
     octets = text.strip().split(":")
-    if len(octets) == 1:
-        bare = octets[0].lower()
-        return bare if re.fullmatch(r"[0-9a-f]{12}", bare) else None
     if len(octets) != 6 or not all(re.fullmatch(r"[0-9a-fA-F]{1,2}", o) for o in octets):
         return None
     return "".join(o.zfill(2) for o in octets).lower()
-
-
-def mac_from_ssid(ssid: str) -> str | None:
-    """The MAC a camera SSID ends in (`CAM8Z8_<mac>`), or None."""
-    return normalize_mac(ssid.rpartition("_")[2])
 
 
 def parse_arp_mac(stdout: str) -> str | None:
@@ -409,19 +429,42 @@ def parse_arp_mac(stdout: str) -> str | None:
     return normalize_mac(match.group(1)) if match else None
 
 
-def identify(seen: str | None, ssid: str, learned: str | None) -> Identity:
-    """Is the gateway MAC we `seen` this camera's?
+def parse_profile_id(stdout: str) -> str | None:
+    """Pull `ProfileID` out of `scutil`'s AirPort state; None when not joined."""
+    match = re.search(r"^\s*ProfileID\s*:\s*([0-9a-fA-F]{16,})\s*$", stdout, re.MULTILINE)
+    return match.group(1).lower() if match else None
 
-    The MAC in the SSID is a guess — nobody has confirmed it is the gateway's
-    rather than, say, the BLE module's — so agreeing with it is proof but
-    disagreeing with it is not. Only a MAC `learned` from an earlier join by
-    SSID can say MISMATCH.
+
+def identify(seen: NetworkId, known: NetworkId) -> Identity:
+    """Is the network we `seen` the one `known` to be a camera's?
+
+    Only a signal both sides have counts. Any that disagrees makes it a
+    MISMATCH, even if another agrees — being wrong about which camera this is
+    files one camera's photos under another, so doubt has to lose.
     """
-    if seen is None:
+    pairs = [
+        (seen.profile_id, known.profile_id),
+        (seen.gateway_mac, known.gateway_mac),
+    ]
+    verdicts = [now == recorded for now, recorded in pairs if now and recorded]
+    if not verdicts:
         return Identity.UNKNOWN
-    if seen in (mac_from_ssid(ssid), learned):
-        return Identity.MATCH
-    return Identity.MISMATCH if learned else Identity.UNKNOWN
+    return Identity.MATCH if all(verdicts) else Identity.MISMATCH
+
+
+def current_profile_id(interface: str | None = None) -> str | None:
+    """The saved-network token for the WiFi network we are joined to, or None."""
+    try:
+        iface = interface or find_wifi_interface()
+        result = subprocess.run(
+            ["scutil"],
+            input=f"show State:/Network/Interface/{iface}/AirPort\n",
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    return parse_profile_id(result.stdout)
 
 
 def reachable(host: str, timeout: float = 0.5) -> bool:
@@ -451,3 +494,15 @@ def gateway_mac(host: str) -> str | None:
     except OSError:
         return None
     return parse_arp_mac(result.stdout)
+
+
+def current_network(host: str, *, probe_gateway: bool = True) -> NetworkId:
+    """Everything readable about the network we are on. `host` is the gateway.
+
+    `probe_gateway=False` skips the MAC, whose read costs a connection attempt —
+    worth saving when there is no recorded MAC to compare it with.
+    """
+    return NetworkId(
+        profile_id=current_profile_id(),
+        gateway_mac=gateway_mac(host) if probe_gateway else None,
+    )

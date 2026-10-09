@@ -4,16 +4,17 @@ from bushdump.cli import _format_candidate_row, _is_camera_ble, _mark
 from bushdump.wifi import (
     REDACTED_HINT,
     Identity,
+    NetworkId,
     _seen_from_scan,
     diagnose_scan,
     identify,
     is_likely_camera_ssid,
     join,
     join_succeeded,
-    mac_from_ssid,
     normalize_mac,
     parse_arp_mac,
     parse_current_ssid,
+    parse_profile_id,
     parse_wifi_interface,
     rank_ssids,
     wait_for_ssid,
@@ -318,21 +319,19 @@ def test_join_stops_retrying_when_the_caller_says_so():
     assert run.call_count == 1
 
 
-# --- identifying a camera by its gateway MAC ---
+# --- identifying the network we are joined to ---
 #
-# SSIDs are redacted on macOS 26 but `arp` is not, and a camera's SSID carries a
-# MAC. Whether that MAC is the gateway's is unverified, hence the learned one.
+# macOS 26 redacts the SSID we are on and macOS 27 the ARP table too, so a
+# camera's network is recognised from whatever a join by SSID let us record:
+# the gateway MAC where `arp` still answers, the WiFi ProfileID where it doesn't.
 
-SSID = "CAM8Z8_A4C10896B3B0"
-SSID_MAC = "a4c10896b3b0"
+MAC = "a4c10896b3b0"
+PROFILE = "9c72eea6cce0c16a6a4db4671ea35018696b4796e7506869b730afe6664b5581"
+OTHER_PROFILE = "1af4c2b6cc2ecebf284ef4c8108834fcd0daa4caa1f74a486f9b1c8b545f5222"
 
 
 def test_normalize_mac_restores_the_leading_zeros_arp_drops():
-    assert normalize_mac("a4:c1:8:96:b3:b0") == SSID_MAC
-
-
-def test_normalize_mac_accepts_bare_hex_in_any_case():
-    assert normalize_mac("A4C10896B3B0") == SSID_MAC
+    assert normalize_mac("a4:c1:8:96:b3:b0") == MAC
 
 
 def test_normalize_mac_rejects_things_that_are_not_macs():
@@ -341,17 +340,9 @@ def test_normalize_mac_rejects_things_that_are_not_macs():
     assert normalize_mac("") is None
 
 
-def test_mac_from_ssid_reads_the_trailing_mac():
-    assert mac_from_ssid(SSID) == SSID_MAC
-
-
-def test_mac_from_ssid_none_for_an_ssid_without_one():
-    assert mac_from_ssid("Trail Cam Pro 1234") is None
-
-
 def test_parse_arp_mac_reads_a_resolved_entry():
     out = "? (192.168.8.1) at a4:c1:8:96:b3:b0 on en0 ifscope [ethernet]\n"
-    assert parse_arp_mac(out) == SSID_MAC
+    assert parse_arp_mac(out) == MAC
 
 
 def test_parse_arp_mac_none_while_unresolved_or_absent():
@@ -359,23 +350,56 @@ def test_parse_arp_mac_none_while_unresolved_or_absent():
     assert parse_arp_mac("192.168.8.1 (192.168.8.1) -- no entry\n") is None
 
 
-def test_identify_matches_the_mac_in_the_ssid():
-    assert identify(SSID_MAC, SSID, None) is Identity.MATCH
+SCUTIL_JOINED = f"""\
+<dictionary> {{
+  BSSID : <data> 0x020000000000
+  CHANNEL : 36
+  ProfileID : {PROFILE}
+  SSID : <data> 0x00
+  SSID_STR : 
+}}
+"""
 
 
-def test_identify_matches_a_learned_mac_the_ssid_does_not_predict():
-    assert identify("a4c10896b3b1", SSID, "a4c10896b3b1") is Identity.MATCH
+def test_parse_profile_id_reads_the_joined_networks_token():
+    assert parse_profile_id(SCUTIL_JOINED) == PROFILE
 
 
-def test_identify_mismatch_when_a_learned_mac_says_otherwise():
-    assert identify("385cfb2540d4", SSID, "a4c10896b3b1") is Identity.MISMATCH
+def test_parse_profile_id_none_when_not_joined():
+    assert parse_profile_id("<dictionary> {\n  Power Status : TRUE\n}\n") is None
+    assert parse_profile_id("  No such key\n") is None
 
 
-def test_identify_unknown_when_no_gateway_mac_was_seen():
-    assert identify(None, SSID, SSID_MAC) is Identity.UNKNOWN
+def test_identify_matches_a_recorded_profile_id():
+    seen = NetworkId(profile_id=PROFILE)
+    assert identify(seen, NetworkId(profile_id=PROFILE)) is Identity.MATCH
 
 
-def test_identify_unknown_when_only_the_unverified_ssid_guess_disagrees():
-    # Nothing learned yet, so a gateway MAC that differs from the SSID's may
-    # just mean the vendor derives the SSID from some other MAC.
-    assert identify("a4c10896b3b1", SSID, None) is Identity.UNKNOWN
+def test_identify_matches_a_recorded_gateway_mac():
+    assert identify(NetworkId(gateway_mac=MAC), NetworkId(gateway_mac=MAC)) is Identity.MATCH
+
+
+def test_identify_mismatch_when_the_profile_id_is_another_networks():
+    seen = NetworkId(profile_id=OTHER_PROFILE)
+    assert identify(seen, NetworkId(profile_id=PROFILE)) is Identity.MISMATCH
+
+
+def test_identify_mismatch_wins_when_the_two_signals_disagree():
+    seen = NetworkId(profile_id=PROFILE, gateway_mac="385cfb2540d4")
+    known = NetworkId(profile_id=PROFILE, gateway_mac=MAC)
+    assert identify(seen, known) is Identity.MISMATCH
+
+
+def test_identify_unknown_when_nothing_was_ever_recorded():
+    # No guessing from the SSID: an unrecorded camera is never recognised.
+    assert identify(NetworkId(profile_id=PROFILE, gateway_mac=MAC), NetworkId()) is Identity.UNKNOWN
+
+
+def test_identify_unknown_when_nothing_recorded_can_be_read_now():
+    assert identify(NetworkId(), NetworkId(profile_id=PROFILE, gateway_mac=MAC)) is Identity.UNKNOWN
+
+
+def test_identify_ignores_a_signal_only_one_side_has():
+    seen = NetworkId(profile_id=PROFILE, gateway_mac=None)
+    known = NetworkId(profile_id=PROFILE, gateway_mac=MAC)
+    assert identify(seen, known) is Identity.MATCH

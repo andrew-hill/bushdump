@@ -683,3 +683,72 @@ def test_sync_joined_needs_a_camera_name(capsys):
     args = cli.build_parser().parse_args(["sync", "--joined"])
     assert args.func(args) == 1
     assert "--joined" in capsys.readouterr().err
+
+
+# --- recording and recognising a camera's network ---------------------------
+
+PROFILE = "9c72eea6cce0c16a6a4db4671ea35018696b4796e7506869b730afe6664b5581"
+
+
+def test_camera_identity_is_unknown_without_probing_when_nothing_is_recorded():
+    with (
+        patch("bushdump.config.load_meta", return_value={"gate": {"brand": "GardePro"}}),
+        patch("bushdump.wifi.current_network") as current,
+    ):
+        assert cli._camera_identity(_cam()) is wifi.Identity.UNKNOWN
+    current.assert_not_called()
+
+
+def test_camera_identity_matches_a_recorded_profile_without_touching_the_gateway():
+    with (
+        patch("bushdump.config.load_meta", return_value={"gate": {"profile_id": PROFILE}}),
+        patch(
+            "bushdump.wifi.current_network", return_value=wifi.NetworkId(profile_id=PROFILE)
+        ) as current,
+    ):
+        assert cli._camera_identity(_cam()) is wifi.Identity.MATCH
+    current.assert_called_once_with("192.168.8.1:8080", probe_gateway=False)
+
+
+def test_record_network_replaces_what_was_recorded_before(capsys):
+    before = {"gate": {"brand": "GardePro", "gateway_mac": "a4c10896b3b0"}}
+    with (
+        patch("bushdump.config.load_meta", return_value=before),
+        patch("bushdump.config.save_meta") as save,
+        patch("bushdump.wifi.current_network", return_value=wifi.NetworkId(profile_id=PROFILE)),
+    ):
+        assert cli._record_network("gate", "192.168.8.1:8080") is True
+    save.assert_called_once_with({"gate": {"brand": "GardePro", "profile_id": PROFILE}})
+    assert "Recorded" in capsys.readouterr().out
+
+
+def test_record_network_keeps_the_old_record_when_nothing_is_readable():
+    before = {"gate": {"profile_id": PROFILE}}
+    with (
+        patch("bushdump.config.load_meta", return_value=before),
+        patch("bushdump.config.save_meta") as save,
+        patch("bushdump.wifi.current_network", return_value=wifi.NetworkId()),
+    ):
+        assert cli._record_network("gate", "192.168.8.1:8080") is False
+    save.assert_not_called()
+
+
+def test_prove_joins_by_ssid_even_when_the_network_is_already_recognised():
+    wake, _wait, join = _wake_join_with([wifi.Identity.MATCH] * 9, prove=True)
+    assert wake.call_count == 1
+    assert join.call_count == 1
+
+
+def test_identify_records_nothing_unless_it_joined_by_ssid(capsys):
+    args = cli.build_parser().parse_args(["identify", "gate"])
+    with (
+        patch("bushdump.cli._resolve_camera", return_value=_cam()),
+        patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
+        patch("bushdump.wifi.current_ssid", return_value=None),
+        patch("bushdump.wifi.wait_for_ssid", return_value=True),
+        patch("bushdump.wifi.join", return_value=False),
+        patch("bushdump.cli._record_network") as record,
+    ):
+        assert args.func(args) == 1
+    record.assert_not_called()
+    assert "nothing recorded" in capsys.readouterr().err.lower()

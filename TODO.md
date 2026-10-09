@@ -73,28 +73,30 @@ any `httpx.TransportError` four times. Nothing here has met a real camera.
 - [ ] A stopped run must report the files it did save. The old code printed
       `Done — 0 new file(s)` after saving 82.
 
-### Wake/join fast path (new 2026-10-08, never run against hardware)
+### Wake/join fast path (new 2026-10-09, never run against hardware)
 
-`_wake_join` now recognises a camera's network by gateway MAC, keeps checking
-through every wait, and lets Enter cut a wait short. None of it has met a camera.
+`_wake_join` recognises a camera's network from an identity recorded at an
+earlier join by SSID, keeps checking through every wait, and lets Enter cut a
+wait short. Proven off-site against two home networks only.
 
-- [ ] While joined, run `arp -n 192.168.8.1` and compare the MAC with the one in
-      the SSID, on both models. If they match, the fast path works from the
-      first run; if not, it only works once `gateway_mac` is in `meta.json`.
-      Either way record the answer in `docs/camera-api.md` ("Whose MAC is it?").
-- [ ] After one normal `bd stats <name>`, `~/.config/bushdump/meta.json` should
-      carry a `gateway_mac` for that camera.
+- [ ] `bd identify <name>` on each camera: expect `Recorded <name>'s network
+      identity (profile …)` and a `profile_id` in `~/.config/bushdump/meta.json`.
+      This is the open question — whether a network joined through
+      `networksetup` with a password gets a `ProfileID` at all.
+- [ ] The two cameras' `profile_id`s must differ.
 - [ ] Run `bd stats <name>` again while still on its AP: expect `Already on
-      <name>'s network (gateway MAC matches)` within a second or two, on Tahoe.
+      <name>'s network (recognised from an earlier join)` at once.
 - [ ] Join east's AP by hand, then `bd stats norw`: it must **not** report
       "already on" — it should wake and join norw.
 - [ ] Start `bd sync <name>` from the home network and let macOS auto-join the
       AP mid-wake: the wake/scan should be abandoned and the sync start.
 - [ ] Press Enter during the BLE scan, the AP wait and the join in turn. Each
       should move on at once; a real WiFi scan in flight (~7s) finishes first.
-- [ ] `bd stats <name> --joined` on the right AP, on the wrong camera's AP
-      (must refuse once a MAC is recorded) and on the home network.
-- [ ] `bd prune <name> --joined` must refuse unless the gateway MAC matches.
+- [ ] `bd stats <name> --joined` on the right AP, on the other camera's AP
+      (must refuse) and on the home network (must refuse once recorded).
+- [ ] `bd prune <name> --joined` must refuse unless the network is recognised.
+- [ ] Does a `ProfileID` survive forgetting and re-saving the network? If not,
+      `identify` again is the fix; note it in `docs/camera-api.md`.
 
 ### `bd sync --retry`
 
@@ -175,6 +177,27 @@ Also unredacted: `networksetup -listpreferredwirelessnetworks` (saved networks,
 no admin needed), the "Could not find network X" error from
 `-setairportnetwork`, WiFi power state, and BLE.
 
+### macOS 27 (Golden Gate) — measured 27.0.1, 2026-10-09
+
+Stricter again, the same inside and outside a sandbox:
+
+- `networksetup -getairportnetwork` says "You are not associated with an
+  AirPort network" while joined — wrong, not merely redacted.
+- `arp -an` is empty even after pinging the router; `ndp` and `ifconfig` show
+  every MAC as `02:00:00:00:00:00`. CoreWLAN `hardwareAddress()` and
+  `networksetup -listallhardwareports` still give the real one.
+- SSID and BSSID stay redacted in CoreWLAN, `ipconfig getsummary`,
+  `system_profiler`, `ioreg` and `scutil`.
+- Turning off "Limit IP Address Tracking" and "Private Wi-Fi Address" changes
+  none of it.
+- Joining a *saved* network through `-setairportnetwork` with no password fails
+  (`Error: -3900`) and bounces the association; with the password it joins.
+- Still readable: IP, router, DHCP server, channel, RSSI, security type, the
+  directed scan, and **`ProfileID`** in `scutil`'s
+  `State:/Network/Interface/<iface>/AirPort` — identical across four reads and
+  three rejoins of one network (including after the Mac's own MAC changed),
+  different on a second network. Not a plain SHA-256 of the SSID.
+
 ### Code
 
 - [ ] `register` — offer saved networks as a pick-list (camera-likely first),
@@ -184,12 +207,12 @@ no admin needed), the "Could not find network X" error from
       `networksetup -listpreferredwirelessnetworks <iface>`, which macOS 26 does
       not redact; `wifi.saved_ssids()` wrapped it but was deleted as dead code,
       so rebuild it here when this lands.
-- [ ] `_wake_join` identifies the camera it is already on by gateway MAC
-      (`wifi.identify`), which no macOS version redacts, and skips the wake+join
-      on a match — at the start and during every wait. Probing `camera_host`
-      alone was never enough: every camera answers on `192.168.8.1:8080`, so it
-      could take camera A for camera B and file A's photos under B. Unverified
-      on hardware; see "Wake/join fast path" under the smoke tests.
+- [ ] `_wake_join` recognises the camera it is already on from a recorded
+      network identity (`wifi.identify`) and skips the wake+join on a match —
+      at the start and during every wait. Probing `camera_host` alone was never
+      enough: every camera answers on `192.168.8.1:8080`, so it could take
+      camera A for camera B and file A's photos under B. Unverified on
+      hardware; see "Wake/join fast path" under the smoke tests.
 
       **Failed-join cost measured** (off-site, 2026-08-24, stale BLE address so
       the camera is unreachable): `bd sync <name>` took **208s** before giving

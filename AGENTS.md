@@ -24,7 +24,7 @@ generality. No service to deploy, no multi-tenancy, no scale concerns.
 
 ## Supported macOS versions
 
-**macOS 15 (Sequoia) and 26 (Tahoe) are both supported.** Keep it that way:
+**macOS 15 (Sequoia), 26 (Tahoe) and 27 (Golden Gate) are all supported.** Keep it that way:
 nothing branches on the OS version, and nothing should — every WiFi path decides
 from what CoreWLAN or `networksetup` actually returns, so a machine that can
 read SSIDs gets the fast path and one that can't degrades on its own.
@@ -39,11 +39,17 @@ things Sequoia still has:
   are unaffected.
 - **Skipping a redundant wake by SSID.** `_wake_join` short-circuits when
   `wifi.current_ssid()` already matches the camera's SSID. Tahoe redacts that
-  read, so there the same job falls to the gateway MAC (`wifi.identify`): `arp`
-  is not redacted, the SSID carries a MAC, and a join by SSID records the
-  gateway's real one in `meta.json`. Whether the SSID's MAC *is* the gateway's
-  is unverified, so on Tahoe the first run against a camera may still pay the
-  full BLE wake and join.
+  read (27 goes further and reports "not associated"), so there the same job
+  falls to an identity *recorded* while joined by SSID — see below.
+
+macOS 27 takes away more: the ARP table is empty and every MAC reads
+`02:00:00:00:00:00`, so the gateway's MAC is gone as well. What it still hands
+over is a `ProfileID` in the dynamic store (`scutil`), constant per saved
+network. `wifi.NetworkId` holds whichever of the two the OS gives up;
+`_record_network` stores it in `meta.json` after a join by SSID (automatically,
+or on demand with `bushdump identify <name>`), and `wifi.identify` compares.
+Nothing is inferred from the SSID's own MAC — an unrecorded camera is never
+recognised, it gets the full wake+join.
 
 Neither is a correctness problem, so don't "fix" the redaction path by assuming
 it — the fallbacks have to stay good enough to be the only path. See the macOS 26
@@ -68,6 +74,7 @@ bushdump sync                              # scan and sync every nearby configur
 bushdump sync frontgate                    # sync just one camera
 bushdump sync --manual-wifi                # skip auto WiFi; prompt you to join each AP
 bushdump stats <name> --joined             # already on the camera's WiFi: skip wake+join
+bushdump identify <name>                   # join by SSID and record how to recognise its network
 bushdump keepalive <name>                  # keep camera WiFi alive (pings every 10s; Ctrl+C to stop)
 uv run pytest                              # run tests
 uv run pytest tests/test_sync.py -q        # one file
@@ -78,13 +85,13 @@ uv run ruff format .                       # format
 ## Project structure
 
 - `bushdump/ble.py` — BLE: `watch()` (live scan), `discover()` (snapshot), `wake_wifi()`; deps imported lazily
-- `bushdump/wifi.py` — macOS WiFi: `watch_ssids` lists networks via CoreWLAN, `ssid_present`/`wait_for_ssid` check one AP by name (the only thing that works under macOS 26 SSID redaction), `diagnose_scan` explains an unusable scan; join an AP via `networksetup` (no auto-restore)
+- `bushdump/wifi.py` — macOS WiFi: `watch_ssids` lists networks via CoreWLAN, `ssid_present`/`wait_for_ssid` check one AP by name (the only thing that works under macOS 26 SSID redaction), `diagnose_scan` explains an unusable scan; join an AP via `networksetup` (no auto-restore); `NetworkId`/`identify` recognise the network we are on from a recorded ProfileID or gateway MAC
 - `bushdump/camera.py` — HTTP client for the Linkiing platform (`/cmd/info/N`, `/list/detail/forward/`, `/file/`); `httpx` imported lazily so pure helpers stay testable without it
 - `bushdump/sync.py` — pure logic: `files_to_download`/`next_watermark` (watermark) and `cameras_present` (match scanned addresses to config)
 - `bushdump/backup.py` — pure backup watermark logic: `date_from_name`, `parse_rsync_pending`, `media_names_of_kind`, `safe_watermark`, `advance_watermark`
 - `bushdump/prune.py` — prune candidate logic: `classify_for_prune`, `cutoffs_by_media` (per-type cutoff), `scan_local_dir`, `parse_cutoff`; dataclasses `LocalFile`, `PruneVerdict`
 - `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state (`state.json`) + backup watermarks (`backups.json`)
-- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `wake`, `stats`, `settings`, `clock`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`, `completions`); orchestrates the flows
+- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `wake`, `identify`, `stats`, `settings`, `clock`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`, `completions`); orchestrates the flows
 - `tests/` — pytest; pure logic only, no real camera/BLE/WiFi needed
 - `docs/camera-api.md` — the reverse-engineered camera API reference
 - `docs/camera-models.md` — registry of which models have been confirmed against `camera-api.md`
@@ -113,11 +120,11 @@ auto-restore your normal WiFi — the laptop stays on the (last) camera's AP; yo
 rejoin your usual network yourself. Races are handled by polling, not fixed
 sleeps. `--manual-wifi` swaps BLE+auto-join for a "join the AP, press Enter" prompt.
 
-The wake+join is skipped whenever we are already on that camera's network — at
-the start, or part-way through if macOS auto-joins while we are still waking.
-Enter cuts the current wait short. `--joined` (any camera command) skips it on
-your say-so, refusing only a gateway known to be another camera's; `prune`
-additionally refuses unless the gateway is positively this camera's.
+The wake+join is skipped whenever we recognise that camera's network from an
+earlier join — at the start, or part-way through if macOS auto-joins while we
+are still waking. Enter cuts the current wait short. `--joined` (any camera
+command) skips it on your say-so, refusing only a network recorded as another
+camera's; `prune` additionally refuses unless it is positively this camera's.
 
 ## ble / wifi / register flow
 
