@@ -1,10 +1,12 @@
+import argparse
+import dataclasses
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-from bushdump import cli, config, wifi
+from bushdump import cli, config, helper, wifi
 from bushdump.camera import CameraFile, CameraStats
 
 
@@ -525,6 +527,7 @@ def _ap_camera() -> MagicMock:
     cam.ssid = "CAM8Z8_AABBCCDDEEFF"
     cam.password = "1234567890"
     cam.ble_address = "D1AE237D-FF38-DF02-2E8D-A1A9813A0CD6"
+    cam.profile_id = None
     return cam
 
 
@@ -532,7 +535,7 @@ def test_wake_join_skips_wake_when_already_on_that_ssid(capsys):
     """An SSID match identifies the camera: SSIDs carry the device's WiFi MAC."""
     cam = _ap_camera()
     with (
-        patch("bushdump.wifi.current_ssid", return_value=cam.ssid),
+        patch("bushdump.wifi.observe", return_value=wifi.Observed(networksetup_ssid=cam.ssid)),
         patch("bushdump.wifi.join") as join,
         patch("bushdump.cli._wake_and_report") as wake,
     ):
@@ -548,8 +551,8 @@ def test_wake_join_proceeds_when_ssid_is_redacted(capsys):
     """macOS 26 hands back a placeholder, which must not match and must not skip."""
     cam = _ap_camera()
     with (
-        patch("bushdump.wifi.current_ssid", return_value="<redacted>"),
-        patch("bushdump.cli._camera_identity", return_value=wifi.Identity.UNKNOWN),
+        patch("bushdump.wifi.observe", return_value=wifi.Observed(networksetup_ssid="<redacted>")),
+        patch("bushdump.helper.current", return_value=None),
         patch("bushdump.wifi.join") as join,
         patch("bushdump.wifi.wait_for_ssid", return_value=True),
         patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
@@ -562,8 +565,11 @@ def test_wake_join_proceeds_when_ssid_is_redacted(capsys):
 def test_wake_join_proceeds_when_on_a_different_ssid():
     cam = _ap_camera()
     with (
-        patch("bushdump.wifi.current_ssid", return_value="CAM8Z8_112233445566"),
-        patch("bushdump.cli._camera_identity", return_value=wifi.Identity.UNKNOWN),
+        patch(
+            "bushdump.wifi.observe",
+            return_value=wifi.Observed(networksetup_ssid="CAM8Z8_112233445566"),
+        ),
+        patch("bushdump.helper.current", return_value=None),
         patch("bushdump.wifi.join") as join,
         patch("bushdump.wifi.wait_for_ssid", return_value=True),
         patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
@@ -598,7 +604,8 @@ def _wake_join_with(identities, *, enter=False, wake=None, **kwargs):
         patch("bushdump.cli._camera_identity", side_effect=identities),
         patch("bushdump.cli._enter_pressed", return_value=enter),
         patch("bushdump.cli._wake_and_report", wake_mock),
-        patch("bushdump.wifi.current_ssid", return_value=None),
+        patch("bushdump.helper.current", return_value=None),
+        patch("bushdump.wifi.observe", return_value=wifi.Observed()),
         patch("bushdump.wifi.wait_for_ssid", return_value=True) as wait,
         patch("bushdump.wifi.join", return_value=True) as join,
     ):
@@ -685,52 +692,41 @@ def test_sync_joined_needs_a_camera_name(capsys):
     assert "--joined" in capsys.readouterr().err
 
 
-# --- recording and recognising a camera's network ---------------------------
+# --- recognising a camera's network, and saying how to speed things up ------
 
 PROFILE = "9c72eea6cce0c16a6a4db4671ea35018696b4796e7506869b730afe6664b5581"
 
 
-def test_camera_identity_is_unknown_without_probing_when_nothing_is_recorded():
+def _slow_path_output(capsys, *, profile_id, helper_reply) -> str:
+    cam = dataclasses.replace(_cam(), profile_id=profile_id)
     with (
-        patch("bushdump.config.load_meta", return_value={"gate": {"brand": "GardePro"}}),
-        patch("bushdump.wifi.current_network") as current,
+        patch("bushdump.cli._camera_identity", return_value=wifi.Identity.UNKNOWN),
+        patch("bushdump.cli._enter_pressed", return_value=False),
+        patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
+        patch("bushdump.helper.current", return_value=helper_reply),
+        patch("bushdump.wifi.observe", return_value=wifi.Observed()),
+        patch("bushdump.wifi.wait_for_ssid", return_value=True),
+        patch("bushdump.wifi.join", return_value=True),
     ):
-        assert cli._camera_identity(_cam()) is wifi.Identity.UNKNOWN
-    current.assert_not_called()
+        cli._wake_join(cam)
+    return capsys.readouterr().out
 
 
-def test_camera_identity_matches_a_recorded_profile_without_touching_the_gateway():
-    with (
-        patch("bushdump.config.load_meta", return_value={"gate": {"profile_id": PROFILE}}),
-        patch(
-            "bushdump.wifi.current_network", return_value=wifi.NetworkId(profile_id=PROFILE)
-        ) as current,
-    ):
-        assert cli._camera_identity(_cam()) is wifi.Identity.MATCH
-    current.assert_called_once_with("192.168.8.1:8080", probe_gateway=False)
+def test_slow_path_says_how_to_speed_up_when_nothing_can_recognise_the_network(capsys):
+    out = _slow_path_output(capsys, profile_id=None, helper_reply=None)
+    assert "bushdump helper install" in out
+    assert "bushdump identify gate" in out
 
 
-def test_record_network_replaces_what_was_recorded_before(capsys):
-    before = {"gate": {"brand": "GardePro", "gateway_mac": "a4c10896b3b0"}}
-    with (
-        patch("bushdump.config.load_meta", return_value=before),
-        patch("bushdump.config.save_meta") as save,
-        patch("bushdump.wifi.current_network", return_value=wifi.NetworkId(profile_id=PROFILE)),
-    ):
-        assert cli._record_network("gate", "192.168.8.1:8080") is True
-    save.assert_called_once_with({"gate": {"brand": "GardePro", "profile_id": PROFILE}})
-    assert "Recorded" in capsys.readouterr().out
+def test_slow_path_is_quiet_once_a_profile_id_is_recorded(capsys):
+    out = _slow_path_output(capsys, profile_id=PROFILE, helper_reply=None)
+    assert "bushdump helper install" not in out
 
 
-def test_record_network_keeps_the_old_record_when_nothing_is_readable():
-    before = {"gate": {"profile_id": PROFILE}}
-    with (
-        patch("bushdump.config.load_meta", return_value=before),
-        patch("bushdump.config.save_meta") as save,
-        patch("bushdump.wifi.current_network", return_value=wifi.NetworkId()),
-    ):
-        assert cli._record_network("gate", "192.168.8.1:8080") is False
-    save.assert_not_called()
+def test_slow_path_is_quiet_when_the_helper_is_working(capsys):
+    reply = helper.Reply(authorized=True, ssid="G")
+    out = _slow_path_output(capsys, profile_id=None, helper_reply=reply)
+    assert "bushdump helper install" not in out
 
 
 def test_prove_joins_by_ssid_even_when_the_network_is_already_recognised():
@@ -739,16 +735,103 @@ def test_prove_joins_by_ssid_even_when_the_network_is_already_recognised():
     assert join.call_count == 1
 
 
-def test_identify_records_nothing_unless_it_joined_by_ssid(capsys):
+def _identify(observed, *, joined=True, profile=PROFILE):
+    """Run `identify gate`; return (exit code, set_camera_key mock, wake_join mock)."""
     args = cli.build_parser().parse_args(["identify", "gate"])
     with (
         patch("bushdump.cli._resolve_camera", return_value=_cam()),
-        patch("bushdump.cli._wake_and_report", return_value=cli.WakeOutcome.ACKED),
-        patch("bushdump.wifi.current_ssid", return_value=None),
-        patch("bushdump.wifi.wait_for_ssid", return_value=True),
-        patch("bushdump.wifi.join", return_value=False),
-        patch("bushdump.cli._record_network") as record,
+        patch("bushdump.wifi.observe", return_value=observed),
+        patch("bushdump.cli._wake_join", return_value=joined) as wake_join,
+        patch("bushdump.wifi.current_profile_id", return_value=profile),
+        patch("bushdump.cli.time.sleep"),
+        patch("bushdump.config.set_camera_key") as set_key,
     ):
-        assert args.func(args) == 1
-    record.assert_not_called()
+        return args.func(args), set_key, wake_join
+
+
+def test_identify_records_without_joining_when_the_helper_names_the_camera():
+    on_camera = wifi.Observed(helper=helper.Reply(authorized=True, ssid=_cam().ssid))
+    code, set_key, wake_join = _identify(on_camera)
+    assert code == 0
+    wake_join.assert_not_called()
+    set_key.assert_called_once_with("gate", "profile_id", PROFILE)
+
+
+def test_identify_joins_by_ssid_when_nothing_names_the_network():
+    code, set_key, wake_join = _identify(wifi.Observed(profile_id=PROFILE))
+    assert code == 0
+    wake_join.assert_called_once_with(_cam(), prove=True)
+    set_key.assert_called_once_with("gate", "profile_id", PROFILE)
+
+
+def test_identify_records_nothing_unless_it_joined_by_ssid(capsys):
+    code, set_key, _ = _identify(wifi.Observed(), joined=False)
+    assert code == 1
+    set_key.assert_not_called()
     assert "nothing recorded" in capsys.readouterr().err.lower()
+
+
+def test_identify_records_nothing_when_macos_offers_no_profile_id(capsys):
+    code, set_key, _ = _identify(wifi.Observed(), profile=None)
+    assert code == 1
+    set_key.assert_not_called()
+    assert "profileid" in capsys.readouterr().err.lower()
+
+
+def test_every_command_is_listed_in_the_top_level_help():
+    # The grouped list in --help is written by hand, so a new subcommand is
+    # invisible there until someone remembers to add it.
+    parser = cli.build_parser()
+    listed = parser.format_help()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    commands = {a.dest for a in subparsers._choices_actions}
+    missing = sorted(c for c in commands if f"\n    {c}" not in listed)
+    assert not missing, f"not in --help: {missing}"
+
+
+# --- the ProfileID fallback primes itself whenever the helper confirms ------
+
+
+def _remember(observed, *, recorded=None):
+    cam = dataclasses.replace(_cam(), profile_id=recorded)
+    with (
+        patch("bushdump.wifi.observe", return_value=observed),
+        patch("bushdump.config.set_camera_key") as set_key,
+    ):
+        cli._remember_profile(cam)
+    return cam, set_key
+
+
+def test_remember_profile_records_what_the_helper_confirmed(capsys):
+    on_camera = wifi.Observed(
+        helper=helper.Reply(authorized=True, ssid=_cam().ssid), profile_id=PROFILE
+    )
+    cam, set_key = _remember(on_camera)
+    set_key.assert_called_once_with("gate", "profile_id", PROFILE)
+    assert cam.profile_id == PROFILE
+    assert "ProfileID" in capsys.readouterr().out
+
+
+def test_remember_profile_does_nothing_without_the_helpers_confirmation():
+    _cam_after, set_key = _remember(wifi.Observed(profile_id=PROFILE))
+    set_key.assert_not_called()
+
+
+def test_remember_profile_never_breaks_the_command_it_rides_on():
+    on_camera = wifi.Observed(
+        helper=helper.Reply(authorized=True, ssid=_cam().ssid), profile_id=PROFILE
+    )
+    cam = _cam()
+    with (
+        patch("bushdump.wifi.observe", return_value=on_camera),
+        patch("bushdump.config.set_camera_key", side_effect=ValueError("no such section")),
+    ):
+        cli._remember_profile(cam)
+    assert cam.profile_id is None
+
+
+def test_wake_join_remembers_the_profile_on_both_ways_onto_the_network():
+    with patch("bushdump.cli._remember_profile") as remember:
+        _wake_join_with([wifi.Identity.MATCH])
+        _wake_join_with([wifi.Identity.UNKNOWN] * 9)
+    assert remember.call_count == 2

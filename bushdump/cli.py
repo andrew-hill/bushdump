@@ -24,7 +24,7 @@ from typing import IO, TYPE_CHECKING
 
 import argcomplete
 
-from bushdump import __version__, config, sync
+from bushdump import __version__, config, helper, sync
 
 if TYPE_CHECKING:
     from bushdump import health, wifi
@@ -41,10 +41,6 @@ _verbose: bool = False
 # camera never left the network it started on, and saying otherwise sends you
 # hunting through WiFi settings for nothing.
 _joined_ap: bool = False
-# The camera whose AP this run joined *by SSID* — the one way of getting onto a
-# network that proves which camera it is, and so the only time the gateway MAC
-# we see is safe to record against that camera's name.
-_ssid_joined: str | None = None
 
 
 def _note_joined_ap() -> None:
@@ -252,60 +248,18 @@ def cmd_cameras(args: argparse.Namespace) -> int:
 
 
 def _cache_identity(client: CameraClient, cam_name: str) -> None:
-    """Fetch /cmd/info/1 and persist it to meta.json. Best-effort — never raises.
-
-    Also records the network's identity when this run joined the camera by SSID,
-    which is what lets later runs recognise its network without reading an SSID.
-    """
+    """Fetch /cmd/info/1 and persist it to meta.json. Best-effort — never raises."""
     import datetime as _dt
 
     try:
         ident = client.identity()
-        if ident:
-            meta = config.load_meta()
-            meta[cam_name] = {
-                **meta.get(cam_name, {}),
-                **ident,
-                "last_seen": _dt.date.today().isoformat(),
-            }
-            config.save_meta(meta)
-        if _ssid_joined == cam_name:
-            _record_network(cam_name, client.host)
+        if not ident:
+            return
+        meta = config.load_meta()
+        meta[cam_name] = {**ident, "last_seen": _dt.date.today().isoformat()}
+        config.save_meta(meta)
     except Exception:
         pass
-
-
-_NETWORK_KEYS = ("profile_id", "gateway_mac")
-
-
-def _known_network(cam_name: str) -> wifi.NetworkId:
-    """The network identity recorded for a camera; empty if none was."""
-    from bushdump import wifi
-
-    entry = config.load_meta().get(cam_name, {})
-    return wifi.NetworkId(**{k: entry.get(k) for k in _NETWORK_KEYS})
-
-
-def _record_network(cam_name: str, host: str) -> bool:
-    """Record the network we are on as this camera's. False if nothing was readable.
-
-    Only call this while joined to the camera by SSID. What is read now replaces
-    what was recorded before, so a signal the OS has since stopped handing out
-    doesn't linger to contradict the ones it still does.
-    """
-    from bushdump import wifi
-
-    seen = wifi.current_network(host)
-    if not seen:
-        return False
-    if seen != _known_network(cam_name):
-        meta = config.load_meta()
-        entry = {k: v for k, v in meta.get(cam_name, {}).items() if k not in _NETWORK_KEYS}
-        entry.update({k: v for k in _NETWORK_KEYS if (v := getattr(seen, k))})
-        meta[cam_name] = entry
-        config.save_meta(meta)
-        _out(f"Recorded {cam_name}'s network identity ({seen.describe()}).")
-    return True
 
 
 # How long to wait for the AP after a wake the camera did receive, before
@@ -419,18 +373,26 @@ def _enter_pressed() -> bool:
 
 
 def _camera_identity(cam: config.Camera) -> wifi.Identity:
-    """Is the network we are on the one recorded for this camera? See `wifi.identify`.
-
-    UNKNOWN until something has been recorded: an unrecorded camera is never
-    recognised on a guess, it gets the full wake+join.
-    """
+    """Is the network we are on this camera's? See `wifi.identify`."""
     from bushdump import wifi
 
-    known = _known_network(cam.name)
-    if not known:
-        return wifi.Identity.UNKNOWN
-    seen = wifi.current_network(cam.camera_host, probe_gateway=bool(known.gateway_mac))
-    return wifi.identify(seen, known)
+    return wifi.identify(cam.ssid, cam.profile_id, wifi.observe())
+
+
+def _speedup_hint(cam: config.Camera) -> None:
+    """Say how to skip this wait next time, when nothing could recognise the network.
+
+    The helper app names the network outright; failing that, a recorded
+    ProfileID recognises it. With neither we can't tell we are already on the
+    camera's AP, which is the common case on site and costs a wake and a join.
+    """
+    if cam.profile_id or helper.current() is not None:
+        return
+    _out(
+        "  (can't tell which WiFi network this Mac is on, so this always wakes and "
+        f"joins. To skip that when already connected: {helper.INSTALL_HINT}, or "
+        f"`bushdump identify {cam.name}`)"
+    )
 
 
 class _WaitWatch:
@@ -442,7 +404,7 @@ class _WaitWatch:
     an Enter skips one wait and is then spent.
     """
 
-    _PROBE_EVERY_SECS = 2.0
+    _PROBE_EVERY_SECS = 3.0
 
     def __init__(self, cam: config.Camera, *, probe: bool = True) -> None:
         self._cam = cam
@@ -469,11 +431,29 @@ class _WaitWatch:
         return skipped
 
 
-_RECOGNISED = "recognised from an earlier join"
+def _remember_profile(cam: config.Camera) -> None:
+    """Record this camera's ProfileID if the helper confirms we are on its network.
+
+    Keeps the fallback primed for the day the helper isn't there — Location
+    switched off, a rebuild that lost its grant. Best-effort: it rides on
+    commands that have real work to do, so it never fails them.
+    """
+    from bushdump import wifi
+
+    profile = wifi.profile_to_record(cam.ssid, cam.profile_id, wifi.observe())
+    if profile is None:
+        return
+    try:
+        config.set_camera_key(cam.name, "profile_id", profile)
+    except (OSError, ValueError):
+        return
+    cam.profile_id = profile
+    _out(f"  (recorded {cam.name}'s network ProfileID {profile[:8]}… in the config)")
 
 
-def _already_on(cam: config.Camera, how: str) -> None:
-    _out(f"Already on {cam.name}'s network ({how}) — skipping wake+join.")
+def _already_on(cam: config.Camera) -> None:
+    _remember_profile(cam)
+    _out(f"Already on {cam.name}'s network — skipping wake+join.")
     # We are sitting on the camera's AP without having joined it here, and
     # sync still owes the user the "rejoin your normal network" reminder.
     _note_joined_ap()
@@ -482,8 +462,8 @@ def _already_on(cam: config.Camera, how: str) -> None:
 def _require_joined(cam: config.Camera, *, strict: bool) -> None:
     """`--joined`: trust the user that we are on the camera's AP, within limits.
 
-    A gateway known to belong to a different camera is refused outright — that
-    is how one camera's photos end up filed under another. When we simply can't
+    A network known to be something else is refused outright — that is how one
+    camera's photos end up filed under another. When we simply can't
     tell, the user's word is enough to read from a camera but not (`strict`) to
     delete from one.
     """
@@ -492,17 +472,17 @@ def _require_joined(cam: config.Camera, *, strict: bool) -> None:
     identity = _camera_identity(cam)
     if identity is wifi.Identity.MISMATCH:
         raise CameraUnreachable(
-            f"{cam.name}: --joined, but this is not the network recorded for {cam.name}. "
+            f"{cam.name}: --joined, but this Mac is not on {cam.name}'s network. "
             f"Join {cam.ssid!r}, or drop --joined."
         )
     if identity is wifi.Identity.MATCH:
-        _already_on(cam, _RECOGNISED)
+        _already_on(cam)
         return
     if strict:
         raise CameraUnreachable(
             f"{cam.name}: --joined, but nothing confirms this network is {cam.name}'s, "
-            "and that is not enough to delete on. Run it without --joined, or record "
-            f"the network first with `bushdump identify {cam.name}`."
+            f"and that is not enough to delete on. Run it without --joined, or first "
+            f"{helper.INSTALL_HINT} or `bushdump identify {cam.name}`."
         )
     _out(f"  (--joined: can't confirm this is {cam.name}'s network — taking your word for it)")
     _note_joined_ap()
@@ -515,7 +495,7 @@ def _wake_join(
     joined: bool = False,
     strict: bool = False,
     prove: bool = False,
-) -> None:
+) -> bool:
     """BLE-wake then WiFi-join a camera (shared by stats/ls/clock/sync/prune).
 
     The camera's BLE wake is flaky: it can silently no-op, leaving the AP off so
@@ -525,36 +505,30 @@ def _wake_join(
     flaky, it just needs the radio to be up.
 
     A camera answering on `camera_host` proves nothing by itself — every camera
-    answers on that same address. What identifies one is its SSID: joining by
-    SSID proves it, and so does reading back the SSID we are on (macOS 15 only;
-    26 redacts the read). A join by SSID also records what the OS will say about
-    that network (`_record_network`), and recognising that record later
-    short-circuits the wake+join. The same check keeps running through every
-    wait below, because macOS frequently auto-joins the AP while we are still
-    waking or scanning for it.
+    answers on that same address. What identifies one is its SSID, so the
+    wake+join is skipped only when `wifi.identify` says we are on it already.
+    That check keeps running through every wait below, because macOS frequently
+    auto-joins the AP while we are still waking or scanning for it.
 
-    `prove` takes none of those shortcuts: it insists on a fresh join by SSID,
-    which is what `identify` needs before it records anything.
+    `prove` takes no shortcut: it insists on a fresh join by SSID, which is what
+    `identify` needs before it records anything. Returns whether this call
+    joined by SSID.
 
     Every wait can also be cut short with Enter. Skipping the wake goes straight
     to the join; skipping the join goes straight to the camera, and whichever
     command called us finds out there whether the skip was right.
     """
-    global _ssid_joined
     from bushdump import wifi
 
     if joined:
         _require_joined(cam, strict=strict)
-        return
+        return False
 
     if not prove:
-        if cam.ssid and wifi.current_ssid() == cam.ssid:
-            _ssid_joined = cam.name
-            _already_on(cam, f"on '{cam.ssid}'")
-            return
         if _camera_identity(cam) is wifi.Identity.MATCH:
-            _already_on(cam, _RECOGNISED)
-            return
+            _already_on(cam)
+            return False
+        _speedup_hint(cam)
     watch = _WaitWatch(cam, probe=not prove)
 
     if not cam.ble_address:
@@ -569,8 +543,8 @@ def _wake_join(
             if outcome is not WakeOutcome.ABANDONED:
                 presence = _presence_after_wake(cam.ssid, outcome, stop=watch)
             if watch.on_ap:
-                _already_on(cam, _RECOGNISED)
-                return
+                _already_on(cam)
+                return False
             if skipped := watch.take_skip():
                 break
             action = _next_wake_action(outcome, presence, attempt, attempts)
@@ -588,8 +562,8 @@ def _wake_join(
             _out(f"Waiting for AP '{cam.ssid}'...")
             found = wifi.wait_for_ssid(cam.ssid, stop=watch)
             if watch.on_ap:
-                _already_on(cam, _RECOGNISED)
-                return
+                _already_on(cam)
+                return False
             if watch.take_skip():
                 pass
             elif found is False:
@@ -598,9 +572,10 @@ def _wake_join(
                 _out("  Couldn't tell (macOS hides network names) — trying the join anyway.")
 
     _out(f"Joining WiFi '{cam.ssid}'...")
-    if wifi.join(cam.ssid, cam.password, timeout=45.0, stop=watch):
-        _ssid_joined = cam.name
+    joined_by_ssid = wifi.join(cam.ssid, cam.password, timeout=45.0, stop=watch)
     _note_joined_ap()
+    _remember_profile(cam)
+    return joined_by_ssid
 
 
 def _resolve_camera(name: str) -> config.Camera | None:
@@ -617,37 +592,79 @@ def _resolve_camera(name: str) -> config.Camera | None:
 
 @_handle_expected_camera_errors
 def cmd_identify(args: argparse.Namespace) -> int:
-    """Join a camera by SSID and record how to recognise its network later."""
-    global _ssid_joined
-    from bushdump.camera import CameraClient
+    """Record the ProfileID of a camera's network, so it can be recognised later.
+
+    The fallback for a Mac without the helper app. Recording only happens when
+    we are provably on that camera's network: something names it for us, or we
+    join it by SSID here and now.
+    """
+    from bushdump import wifi
 
     cam = _resolve_camera(args.name)
     if cam is None:
         return 1
-    _ssid_joined = None
-    _wake_join(cam, prove=True)
-    if _ssid_joined != cam.name:
+    if wifi.identify(cam.ssid, None, wifi.observe()) is wifi.Identity.MATCH:
+        print(f"On '{cam.ssid}'.")
+    elif not _wake_join(cam, prove=True):
         print(
             f"Did not join {cam.ssid!r} by name, so nothing recorded — that join is "
             "the only proof of which camera this is.",
             file=sys.stderr,
         )
         return 1
-    with CameraClient(cam.camera_host) as client:
-        print("Waiting for camera to respond...")
-        if not client.wait_until_ready():
-            print("Camera did not respond over HTTP — nothing recorded.", file=sys.stderr)
-            return 1
-        print("Connected: " + client.describe())
-    if not _record_network(cam.name, cam.camera_host):
+
+    # The dynamic store can lag the join by a moment.
+    profile = wifi.current_profile_id()
+    for _ in range(10):
+        if profile:
+            break
+        time.sleep(0.5)
+        profile = wifi.current_profile_id()
+    if not profile:
         print(
-            "macOS gave up nothing that identifies this network (no ProfileID, no "
-            "gateway MAC) — nothing recorded.",
+            "macOS reports no ProfileID for this network — nothing recorded. "
+            f"{helper.INSTALL_HINT} is the other way to recognise it.",
             file=sys.stderr,
         )
         return 1
-    known = _known_network(cam.name)
-    print(f"{cam.name} will be recognised by: {known.describe()}.")
+
+    if profile == cam.profile_id:
+        print(f"{cam.name}: ProfileID {profile[:8]}… confirmed, already recorded.")
+        return 0
+    config.set_camera_key(cam.name, "profile_id", profile)
+    was = f" (was {cam.profile_id[:8]}…)" if cam.profile_id else ""
+    print(f"{cam.name}: recorded ProfileID {profile[:8]}…{was} in {config.CONFIG_PATH}")
+    return 0
+
+
+def cmd_helper(args: argparse.Namespace) -> int:
+    """Install the WiFi helper app, or report on it."""
+    if args.action == "install":
+        try:
+            identity = helper.install()
+        except helper.HelperError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        print(f"Installed {helper.APP_PATH}")
+        if identity is None:
+            print(
+                "  Signed ad-hoc (no code-signing identity in the keychain): macOS will "
+                "ask for Location again after every rebuild."
+            )
+        print("Asking for Location permission — click Allow if macOS prompts...")
+        helper.run("authorize", timeout=150.0)
+
+    if not helper.installed():
+        print(f"Not installed. Run {helper.INSTALL_HINT}.")
+        return 1
+    reply = helper.current()
+    if reply is None:
+        print(
+            f"{helper.APP_NAME} is installed but not allowed to read network names. Enable "
+            "it under System Settings → Privacy & Security → Location Services."
+        )
+        return 1
+    print(f"{helper.APP_NAME} is working. Current WiFi network: {reply.ssid or '(none)'}")
     return 0
 
 
@@ -1319,7 +1336,7 @@ def _prompt_name(prompt: str) -> str | None:
 
 def cmd_register(args: argparse.Namespace) -> int:
     from bushdump import wifi
-    from bushdump.camera import DEFAULT_HOST, CameraClient
+    from bushdump.camera import CameraClient
 
     if config.write_config_template():
         print(f"Wrote config template to {config.CONFIG_PATH}")
@@ -1360,8 +1377,6 @@ def cmd_register(args: argparse.Namespace) -> int:
         return 1
 
     config.add_camera(name, ble_address=address, ssid=ssid, password=password)
-    # Still on the AP we just joined by SSID — the one time its identity is proven.
-    _record_network(name, DEFAULT_HOST)
     print(f"Saved '{name}'. Try it with:  bushdump sync {name}")
     return 0
 
@@ -2005,6 +2020,9 @@ def build_parser() -> argparse.ArgumentParser:
   Setup:
     cameras, cams     list configured cameras
     register, reg     register a new camera (guided)
+    helper            install or check the app that reads WiFi network names
+    identify          record a camera network's id, for when the helper is absent
+    completions       print a shell completion script
 
   Sync:
     ls                list files on the camera (* = would be downloaded)
@@ -2056,9 +2074,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_wake.add_argument("name", help="camera name (from `bd cameras`)")
     p_wake.set_defaults(func=cmd_wake)
 
+    p_helper = sub.add_parser(
+        "helper",
+        help="install or check the app that reads WiFi network names (macOS 26+)",
+    )
+    p_helper.add_argument("action", choices=["install", "status"])
+    p_helper.set_defaults(func=cmd_helper)
+
     p_identify = sub.add_parser(
         "identify",
-        help="join a camera by SSID and record how to recognise its network later",
+        help="record a camera network's ProfileID, to recognise it without the helper app",
     )
     p_identify.add_argument("name", help="camera name (from `bd cameras`)")
     p_identify.set_defaults(func=cmd_identify)

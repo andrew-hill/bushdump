@@ -75,26 +75,40 @@ any `httpx.TransportError` four times. Nothing here has met a real camera.
 
 ### Wake/join fast path (new 2026-10-09, never run against hardware)
 
-`_wake_join` recognises a camera's network from an identity recorded at an
-earlier join by SSID, keeps checking through every wait, and lets Enter cut a
-wait short. Proven off-site against two home networks only.
+`_wake_join` skips the wake+join when it can tell we are already on the camera's
+network, keeps checking through every wait, and lets Enter cut a wait short.
+Proven off-site against two home networks only.
 
-- [ ] `bd identify <name>` on each camera: expect `Recorded <name>'s network
-      identity (profile …)` and a `profile_id` in `~/.config/bushdump/meta.json`.
-      This is the open question — whether a network joined through
-      `networksetup` with a password gets a `ProfileID` at all.
-- [ ] The two cameras' `profile_id`s must differ.
-- [ ] Run `bd stats <name>` again while still on its AP: expect `Already on
-      <name>'s network (recognised from an earlier join)` at once.
+With `BushDumpWiFiHelper` installed (`bd helper status` says "working"):
+
+- [ ] The first command against each camera should print `recorded <name>'s
+      network ProfileID …` and add a `profile_id` line to its section of
+      `config.toml`. No line means a network joined through `networksetup` gets
+      no `ProfileID`, and the fallback below cannot work for cameras.
+- [ ] Run `bd stats <name>` twice: the second, still on the AP, should say
+      `Already on <name>'s network` at once.
 - [ ] Join east's AP by hand, then `bd stats norw`: it must **not** report
       "already on" — it should wake and join norw.
 - [ ] Start `bd sync <name>` from the home network and let macOS auto-join the
       AP mid-wake: the wake/scan should be abandoned and the sync start.
+- [ ] `bd wifi` after `bd wake <name>` should list the camera's SSID.
+- [ ] `bd stats <name> --joined` on the right AP, on the other camera's AP and
+      on the home network (the last two must refuse).
+- [ ] `bd prune <name> --joined` must refuse unless on that camera's AP.
+
+Any setup:
+
 - [ ] Press Enter during the BLE scan, the AP wait and the join in turn. Each
       should move on at once; a real WiFi scan in flight (~7s) finishes first.
-- [ ] `bd stats <name> --joined` on the right AP, on the other camera's AP
-      (must refuse) and on the home network (must refuse once recorded).
-- [ ] `bd prune <name> --joined` must refuse unless the network is recognised.
+
+The ProfileID fallback (turn the helper off under Location Services to test):
+
+- [ ] `bd identify <name>` on each camera: expect `recorded ProfileID …` and a
+      `profile_id` line in that camera's section of `config.toml`. This is the
+      open question — whether a network joined through `networksetup` with a
+      password gets a `ProfileID` at all. The two cameras' values must differ.
+- [ ] With it recorded, `bd stats <name>` while on the AP should skip the
+      wake+join, and the "can't tell which WiFi network" hint should be gone.
 - [ ] Does a `ProfileID` survive forgetting and re-saving the network? If not,
       `identify` again is the fix; note it in `docs/camera-api.md`.
 
@@ -152,12 +166,15 @@ be its own errand. Don't expect either to fall out of a routine sync.
 
 ## macOS 26 (Tahoe) SSID redaction
 
-macOS 26 redacts WiFi SSIDs from any process lacking Apple's restricted
-`com.apple.developer.networking.wifi-info` entitlement (needs a provisioning
-profile from a paid developer account; ad-hoc signing it gets the process
-SIGKILLed by AMFI). Location authorization is necessary but **not** sufficient —
-confirmed with `authorizedAlways` plus a live location fix, SSIDs still null.
-`sudo` does not bypass it, and `system_profiler` is redacted too. Not an
+macOS 26 redacts WiFi SSIDs from any process that does not itself hold Location
+permission. A command-line process can't: macOS attributes the permission to
+the terminal, which is why `authorizedAlways` plus a live location fix in a
+Python process still read null and looked like "Location is not sufficient".
+An app bundle launched through LaunchServices can — that is
+`BushDumpWiFiHelper` (measured on 27.0.1; not yet run on 26). Apple's restricted
+`com.apple.developer.networking.wifi-info` entitlement is not needed, and
+ad-hoc signing a binary with it gets the process SIGKILLed by AMFI. `sudo` does
+not bypass the redaction, and `system_profiler` is redacted too. Not an
 Apple-silicon issue; it's the OS version.
 
 **The workaround**: CoreWLAN still *filters* by name even though it won't
@@ -192,7 +209,12 @@ Stricter again, the same inside and outside a sandbox:
   none of it.
 - Joining a *saved* network through `-setairportnetwork` with no password fails
   (`Error: -3900`) and bounces the association; with the password it joins.
-- Still readable: IP, router, DHCP server, channel, RSSI, security type, the
+- An app bundle with Location permission reads the SSID, the BSSID and the
+  names in a scan. It must be launched with `open`: run directly, the binary is
+  the terminal's child again and gets nothing. Signed with a keychain
+  code-signing identity it kept the grant across a rebuild and a move to
+  another folder; an ad-hoc build lost it on rebuild.
+- Still readable from the CLI: IP, router, DHCP server, channel, RSSI, security type, the
   directed scan, and **`ProfileID`** in `scutil`'s
   `State:/Network/Interface/<iface>/AirPort` — identical across four reads and
   three rejoins of one network (including after the Mac's own MAC changed),
@@ -200,19 +222,19 @@ Stricter again, the same inside and outside a sandbox:
 
 ### Code
 
-- [ ] `register` — offer saved networks as a pick-list (camera-likely first),
-      plus join-and-diff to detect a brand-new camera. Live SSID listing can't
-      work under redaction. Where the BLE module programs System ID, derive the
-      SSID from GATT instead (see `docs/camera-api.md`). The pick-list source is
+- [ ] `register` without the helper app — offer saved networks as a pick-list
+      (camera-likely first), plus join-and-diff to detect a brand-new camera.
+      With the helper the live list works again, so this only matters where it
+      isn't installed. Where the BLE module programs System ID, derive the SSID
+      from GATT instead (see `docs/camera-api.md`). The pick-list source is
       `networksetup -listpreferredwirelessnetworks <iface>`, which macOS 26 does
-      not redact; `wifi.saved_ssids()` wrapped it but was deleted as dead code,
-      so rebuild it here when this lands.
-- [ ] `_wake_join` recognises the camera it is already on from a recorded
-      network identity (`wifi.identify`) and skips the wake+join on a match —
-      at the start and during every wait. Probing `camera_host` alone was never
-      enough: every camera answers on `192.168.8.1:8080`, so it could take
-      camera A for camera B and file A's photos under B. Unverified on
-      hardware; see "Wake/join fast path" under the smoke tests.
+      not redact.
+- [ ] `_wake_join` skips the wake+join when `wifi.identify` says we are
+      already on the camera's network — at the start and during every wait.
+      Probing `camera_host` alone was never enough: every camera answers on
+      `192.168.8.1:8080`, so it could take camera A for camera B and file A's
+      photos under B. Unverified on hardware; see "Wake/join fast path" under
+      the smoke tests.
 
       **Failed-join cost measured** (off-site, 2026-08-24, stale BLE address so
       the camera is unreachable): `bd sync <name>` took **208s** before giving

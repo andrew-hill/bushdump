@@ -158,3 +158,46 @@ def test_backup_section_absent_gives_defaults(tmp_path):
     assert cfg.backup.target is None
     assert cfg.backup.args == []
     assert cfg.backup.rsync_bin == "rsync"
+
+
+# --- profile_id: the recorded identity of a camera's WiFi network ---
+
+TWO_CAMERAS = (
+    'password = "pw"\n'
+    "\n"
+    "# GardePro E6PMB\n"
+    "[cameras.east]\n"
+    'ssid = "CAM8Z8_AAAAAAAAAAAA"\n'
+    "\n"
+    "[cameras.norw]\n"
+    'ssid = "CAM8Z8_BBBBBBBBBBBB"\n'
+    'profile_id = "old"\n'
+)
+
+
+def test_load_config_reads_a_cameras_profile_id(tmp_path):
+    cfg = config.load_config(_write(tmp_path / "config.toml", TWO_CAMERAS))
+    assert cfg.cameras["norw"].profile_id == "old"
+    assert cfg.cameras["east"].profile_id is None
+
+
+def test_set_camera_key_adds_the_key_to_the_right_section(tmp_path):
+    path = _write(tmp_path / "config.toml", TWO_CAMERAS)
+    config.set_camera_key("east", "profile_id", "abc123", path)
+    cfg = config.load_config(path)
+    assert cfg.cameras["east"].profile_id == "abc123"
+    assert cfg.cameras["norw"].profile_id == "old"
+    assert "# GardePro E6PMB" in path.read_text(), "comments must survive the edit"
+
+
+def test_set_camera_key_replaces_an_existing_value(tmp_path):
+    path = _write(tmp_path / "config.toml", TWO_CAMERAS)
+    config.set_camera_key("norw", "profile_id", "new", path)
+    assert config.load_config(path).cameras["norw"].profile_id == "new"
+    assert path.read_text().count("profile_id") == 1
+
+
+def test_set_camera_key_refuses_an_unknown_camera(tmp_path):
+    path = _write(tmp_path / "config.toml", TWO_CAMERAS)
+    with pytest.raises(ValueError):
+        config.set_camera_key("gate", "profile_id", "abc", path)

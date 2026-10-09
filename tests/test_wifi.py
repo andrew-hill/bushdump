@@ -1,21 +1,22 @@
 from unittest.mock import patch
 
+from bushdump import helper
 from bushdump.cli import _format_candidate_row, _is_camera_ble, _mark
 from bushdump.wifi import (
     REDACTED_HINT,
     Identity,
-    NetworkId,
+    Observed,
+    _scan_names,
     _seen_from_scan,
     diagnose_scan,
     identify,
     is_likely_camera_ssid,
     join,
     join_succeeded,
-    normalize_mac,
-    parse_arp_mac,
     parse_current_ssid,
     parse_profile_id,
     parse_wifi_interface,
+    profile_to_record,
     rank_ssids,
     wait_for_ssid,
 )
@@ -321,34 +322,14 @@ def test_join_stops_retrying_when_the_caller_says_so():
 
 # --- identifying the network we are joined to ---
 #
-# macOS 26 redacts the SSID we are on and macOS 27 the ARP table too, so a
-# camera's network is recognised from whatever a join by SSID let us record:
-# the gateway MAC where `arp` still answers, the WiFi ProfileID where it doesn't.
+# Three sources, best first: `networksetup` (names the network on macOS 15
+# only), the helper app (names it on 26+ once it has Location permission), and
+# the ProfileID recorded by `bushdump identify` (names nothing, but is constant
+# per saved network).
 
-MAC = "a4c10896b3b0"
+CAM_SSID = "CAM8Z8_A4C10896B3B0"
 PROFILE = "9c72eea6cce0c16a6a4db4671ea35018696b4796e7506869b730afe6664b5581"
 OTHER_PROFILE = "1af4c2b6cc2ecebf284ef4c8108834fcd0daa4caa1f74a486f9b1c8b545f5222"
-
-
-def test_normalize_mac_restores_the_leading_zeros_arp_drops():
-    assert normalize_mac("a4:c1:8:96:b3:b0") == MAC
-
-
-def test_normalize_mac_rejects_things_that_are_not_macs():
-    assert normalize_mac("(incomplete)") is None
-    assert normalize_mac("a4:c1:08:96:b3") is None
-    assert normalize_mac("") is None
-
-
-def test_parse_arp_mac_reads_a_resolved_entry():
-    out = "? (192.168.8.1) at a4:c1:8:96:b3:b0 on en0 ifscope [ethernet]\n"
-    assert parse_arp_mac(out) == MAC
-
-
-def test_parse_arp_mac_none_while_unresolved_or_absent():
-    assert parse_arp_mac("? (192.168.8.1) at (incomplete) on en0 ifscope [ethernet]\n") is None
-    assert parse_arp_mac("192.168.8.1 (192.168.8.1) -- no entry\n") is None
-
 
 SCUTIL_JOINED = f"""\
 <dictionary> {{
@@ -361,6 +342,10 @@ SCUTIL_JOINED = f"""\
 """
 
 
+def _helper(ssid: str | None) -> helper.Reply:
+    return helper.Reply(authorized=True, ssid=ssid)
+
+
 def test_parse_profile_id_reads_the_joined_networks_token():
     assert parse_profile_id(SCUTIL_JOINED) == PROFILE
 
@@ -370,36 +355,103 @@ def test_parse_profile_id_none_when_not_joined():
     assert parse_profile_id("  No such key\n") is None
 
 
-def test_identify_matches_a_recorded_profile_id():
-    seen = NetworkId(profile_id=PROFILE)
-    assert identify(seen, NetworkId(profile_id=PROFILE)) is Identity.MATCH
+def test_identify_matches_when_networksetup_names_the_camera():
+    assert identify(CAM_SSID, None, Observed(networksetup_ssid=CAM_SSID)) is Identity.MATCH
 
 
-def test_identify_matches_a_recorded_gateway_mac():
-    assert identify(NetworkId(gateway_mac=MAC), NetworkId(gateway_mac=MAC)) is Identity.MATCH
+def test_identify_does_not_trust_a_networksetup_name_that_differs():
+    # macOS 26 hands back a placeholder there, and 27 nothing at all, so a name
+    # that isn't the camera's says nothing about which network this is.
+    seen = Observed(networksetup_ssid="<redacted>")
+    assert identify(CAM_SSID, None, seen) is Identity.UNKNOWN
 
 
-def test_identify_mismatch_when_the_profile_id_is_another_networks():
-    seen = NetworkId(profile_id=OTHER_PROFILE)
-    assert identify(seen, NetworkId(profile_id=PROFILE)) is Identity.MISMATCH
+def test_identify_matches_when_the_helper_names_the_camera():
+    assert identify(CAM_SSID, None, Observed(helper=_helper(CAM_SSID))) is Identity.MATCH
 
 
-def test_identify_mismatch_wins_when_the_two_signals_disagree():
-    seen = NetworkId(profile_id=PROFILE, gateway_mac="385cfb2540d4")
-    known = NetworkId(profile_id=PROFILE, gateway_mac=MAC)
-    assert identify(seen, known) is Identity.MISMATCH
+def test_identify_mismatch_when_the_helper_names_another_network():
+    assert identify(CAM_SSID, None, Observed(helper=_helper("G"))) is Identity.MISMATCH
 
 
-def test_identify_unknown_when_nothing_was_ever_recorded():
-    # No guessing from the SSID: an unrecorded camera is never recognised.
-    assert identify(NetworkId(profile_id=PROFILE, gateway_mac=MAC), NetworkId()) is Identity.UNKNOWN
+def test_identify_mismatch_when_the_helper_says_we_are_on_no_network():
+    assert identify(CAM_SSID, None, Observed(helper=_helper(None))) is Identity.MISMATCH
 
 
-def test_identify_unknown_when_nothing_recorded_can_be_read_now():
-    assert identify(NetworkId(), NetworkId(profile_id=PROFILE, gateway_mac=MAC)) is Identity.UNKNOWN
+def test_identify_helper_outranks_a_recorded_profile():
+    seen = Observed(helper=_helper("G"), profile_id=PROFILE)
+    assert identify(CAM_SSID, PROFILE, seen) is Identity.MISMATCH
 
 
-def test_identify_ignores_a_signal_only_one_side_has():
-    seen = NetworkId(profile_id=PROFILE, gateway_mac=None)
-    known = NetworkId(profile_id=PROFILE, gateway_mac=MAC)
-    assert identify(seen, known) is Identity.MATCH
+def test_identify_falls_back_to_the_recorded_profile_without_a_helper():
+    assert identify(CAM_SSID, PROFILE, Observed(profile_id=PROFILE)) is Identity.MATCH
+    assert identify(CAM_SSID, PROFILE, Observed(profile_id=OTHER_PROFILE)) is Identity.MISMATCH
+
+
+def test_identify_unknown_without_a_helper_or_a_recorded_profile():
+    assert identify(CAM_SSID, None, Observed(profile_id=PROFILE)) is Identity.UNKNOWN
+
+
+def test_identify_unknown_when_the_recorded_profile_cannot_be_compared():
+    # Not on WiFi at all reads as "no ProfileID", which is not proof of anything.
+    assert identify(CAM_SSID, PROFILE, Observed()) is Identity.UNKNOWN
+
+
+# --- listing: names come from the helper once macOS redacts them ---
+
+
+def test_scan_names_keeps_names_macos_gave_us_directly():
+    assert _scan_names(["G"], seen=3, ask_helper=lambda: ["other"]) == ["G"]
+
+
+def test_scan_names_asks_the_helper_when_networks_were_seen_but_not_named():
+    assert _scan_names([], seen=3, ask_helper=lambda: ["G", "CAM8Z8_AABBCC112233"]) == [
+        "G",
+        "CAM8Z8_AABBCC112233",
+    ]
+
+
+def test_scan_names_empty_when_the_helper_cannot_tell_either():
+    assert _scan_names([], seen=3, ask_helper=lambda: None) == []
+
+
+def test_scan_names_does_not_bother_the_helper_when_nothing_was_seen():
+    def never() -> list[str]:
+        raise AssertionError("helper asked about an empty scan")
+
+    assert _scan_names([], seen=0, ask_helper=never) == []
+    assert _scan_names([], seen=None, ask_helper=never) == []
+
+
+# --- recording a ProfileID automatically: only on the helper's say-so ---
+
+
+def test_profile_to_record_when_the_helper_confirms_the_camera():
+    seen = Observed(helper=_helper(CAM_SSID), profile_id=PROFILE)
+    assert profile_to_record(CAM_SSID, None, seen) == PROFILE
+
+
+def test_profile_to_record_replaces_a_stale_one():
+    seen = Observed(helper=_helper(CAM_SSID), profile_id=PROFILE)
+    assert profile_to_record(CAM_SSID, OTHER_PROFILE, seen) == PROFILE
+
+
+def test_profile_to_record_nothing_when_already_recorded():
+    seen = Observed(helper=_helper(CAM_SSID), profile_id=PROFILE)
+    assert profile_to_record(CAM_SSID, PROFILE, seen) is None
+
+
+def test_profile_to_record_nothing_when_the_helper_names_another_network():
+    seen = Observed(helper=_helper("G"), profile_id=PROFILE)
+    assert profile_to_record(CAM_SSID, None, seen) is None
+
+
+def test_profile_to_record_nothing_without_the_helper():
+    # networksetup naming the camera is true on macOS 15, but the point of the
+    # automatic path is that it cannot be wrong, so only the helper counts.
+    seen = Observed(networksetup_ssid=CAM_SSID, profile_id=PROFILE)
+    assert profile_to_record(CAM_SSID, None, seen) is None
+
+
+def test_profile_to_record_nothing_when_macos_offers_no_profile_id():
+    assert profile_to_record(CAM_SSID, None, Observed(helper=_helper(CAM_SSID))) is None

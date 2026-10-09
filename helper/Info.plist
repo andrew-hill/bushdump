@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>net.thefrog.bushdump.wifi-helper</string>
+	<key>CFBundleName</key>
+	<string>BushDumpWiFiHelper</string>
+	<key>CFBundleExecutable</key>
+	<string>BushDumpWiFiHelper</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSLocationUsageDescription</key>
+	<string>macOS only reveals Wi-Fi network names to apps with Location access. BushDump uses them to find your trail camera's network.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>macOS only reveals Wi-Fi network names to apps with Location access. BushDump uses them to find your trail camera's network.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>macOS only reveals Wi-Fi network names to apps with Location access. BushDump uses them to find your trail camera's network.</string>
+</dict>
+</plist>
