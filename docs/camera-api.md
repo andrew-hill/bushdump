@@ -139,7 +139,7 @@ GET /cmd/format/result                   # poll SD format status (see response n
 GET /list/detail/forward/<from_id>/<n>   # file listing, paginated (forward = direction; backward may exist)
 GET /file/<id>/<JPG|MP4>                 # full file download
 GET /thumb/<id>/<JPG|MP4>               # thumbnail (MP4 variant unverified)
-GET /cmd/delete/<id>/<JPG|MP4>           # delete (see safety note; used by `bushdump prune` behind dry-run + typed token + backup watermark)
+GET /cmd/delete/<id>/<JPG|MP4>           # delete (see safety note; used by `bushdump prune` behind a printed plan + typed token + backup watermark)
 POST /media/pic/take                     # trigger a remote photo capture
 POST /media/pic/result                   # poll result of last photo capture
 POST /media/video/start                  # start remote video recording
@@ -212,9 +212,9 @@ Poll until `data.status` (or `data.result`) is one of `"done"`, `"finish"`,
   Response contract: `{"code": 0, ...}` on success; non-zero `code` or unexpected
   shape is treated as failure. `CameraClient.delete()` raises `RuntimeError` on
   any non-success so a mid-batch failure surfaces immediately.
-  BushDump exposes this only via `bushdump prune` (dry-run default, typed
-  `DELETE <count>` token, requires backup watermark + local size match + no
-  `.error.txt` sidecar). Never call `CameraClient.delete()` from any other path.
+  BushDump exposes this only via `bushdump prune` (prints the plan first, then
+  deletes only on a typed `DELETE <count>` token, requires backup watermark +
+  local size match + no `.error.txt` sidecar). Never call `CameraClient.delete()` from any other path.
   Id-reuse false positives are made vanishingly unlikely by the live
   `date` + `id` + byte-`size` match in `classify_for_prune`.
   **File-count stats after deletion vary by model**: E6PMB updates `/cmd/info/N`

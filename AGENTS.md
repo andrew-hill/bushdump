@@ -195,8 +195,9 @@ Location permission to scan at all — a separate gate from the name redaction i
 
 ## ⚠️ Safety rules for agents
 
-- **`CameraClient.delete()` is exposed only via `bushdump prune`** (dry-run
-  default, typed `DELETE <count>` token, requires backup watermark + local size
+- **`CameraClient.delete()` is exposed only via `bushdump prune`** (prints the
+  plan first, then deletes only on a typed `DELETE <count>` token; without a
+  terminal it prints the plan and stops; requires backup watermark + local size
   match + no `.error.txt` sidecar). Never call `CameraClient.delete()` from
   any other path, and never add a shortcut that bypasses these guards.
 - **Download is a copy, not a move** — the camera's SD card keeps the files.
