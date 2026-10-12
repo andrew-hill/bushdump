@@ -187,7 +187,7 @@ def _run_health_checks(
     """Run health checks and print warnings, handling clock drift by band.
 
     Returns the clock Warning if the clock was left out of sync (the ≥threshold
-    prompt was declined or timed out), so the caller can re-warn before power-off.
+    prompt was declined or timed out), so the caller can re-warn at the end of the sync.
     Returns None when the clock was synced, within tolerance, or not interactive.
     """
     from bushdump import health
@@ -395,6 +395,23 @@ def _speedup_hint(cam: config.Camera) -> None:
     )
 
 
+_ALREADY_ON_PATIENCE_SECS = 5.0
+
+
+def _camera_answers(cam: config.Camera) -> bool:
+    """Is a camera answering on the network we are on? Liveness, never identity.
+
+    Every camera answers on the same address, so this says nothing about which
+    one it is. What it catches is a network match that has outlived the AP:
+    macOS goes on reporting a network after the camera's WiFi has gone off, and
+    its ProfileID for minutes longer (see `docs/macos.md`).
+    """
+    from bushdump.camera import CameraClient
+
+    with CameraClient(cam.camera_host) as client:
+        return client.wait_until_ready(timeout=_ALREADY_ON_PATIENCE_SECS)
+
+
 class _WaitWatch:
     """The two reasons to stop waiting on a camera, as a `stop` callable.
 
@@ -510,6 +527,10 @@ def _wake_join(
     That check keeps running through every wait below, because macOS frequently
     auto-joins the AP while we are still waking or scanning for it.
 
+    A match at the outset still has to be backed by a camera that answers. When
+    none does, the match is left over from an AP that has since gone off, so
+    the sources that produced it are ignored and the full wake+join runs.
+
     `prove` takes no shortcut: it insists on a fresh join by SSID, which is what
     `identify` needs before it records anything. Returns whether this call
     joined by SSID.
@@ -525,10 +546,17 @@ def _wake_join(
         return False
 
     if not prove:
-        if _camera_identity(cam) is wifi.Identity.MATCH:
+        if _camera_identity(cam) is not wifi.Identity.MATCH:
+            _speedup_hint(cam)
+        elif _camera_answers(cam):
             _already_on(cam)
             return False
-        _speedup_hint(cam)
+        else:
+            _out(
+                f"This Mac still reports {cam.name}'s network, but the camera is not "
+                "answering — its WiFi has gone off. Waking it."
+            )
+            prove = True
     watch = _WaitWatch(cam, probe=not prove)
 
     if not cam.ble_address:
@@ -961,8 +989,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
         _out(f"\nDone — {total} new file(s).")
         if all_conflicts:
             _out_conflicts(all_conflicts)
-        if _joined_ap:
-            _out("(Still on the camera's WiFi — rejoin your normal network when you're done.)")
+        if _joined_ap and args.power_off:
+            _out("(Camera WiFi powered off — rejoin your normal network.)")
+        elif _joined_ap:
+            _out(
+                "(Still on the camera's WiFi — rejoin your normal network when you're done. "
+                "The camera turns its WiFi off by itself once idle.)"
+            )
         return 1 if failed else 0
     finally:
         if caffeine is not None:
@@ -1113,7 +1146,7 @@ def _sync_one(
             _out("  Clock still out of sync:", err=True)
             _warn_line(clock_warning)
 
-        if not args.keep_awake:
+        if args.power_off:
             client.power_off()
 
     return SyncResult(downloaded_count, conflicts, stopped_early)
@@ -1209,6 +1242,45 @@ def cmd_wifi(args: argparse.Namespace) -> int:
     # An empty list is an answer, not a failure: on macOS 26 the names are
     # redacted and it is the permanent state. Only a scan that never ran fails.
     return 0 if outcome.scanned else 1
+
+
+@_handle_expected_camera_errors
+def cmd_sleep(args: argparse.Namespace) -> int:
+    """Turn off the WiFi of the camera we are on. Never wakes one to do it."""
+    from bushdump import wifi
+    from bushdump.camera import CameraClient
+
+    if args.name is None:
+        cam = _current_camera(config.load_config().cameras.values())
+        if cam is None:
+            print(
+                "Can't tell that this Mac is on a camera's network — name the camera, "
+                "or join its WiFi first.",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        cam = _resolve_camera(args.name)
+        if cam is None:
+            return 1
+        identity = _camera_identity(cam)
+        if identity is wifi.Identity.MISMATCH:
+            print(
+                f"Not on {cam.name}'s network, so its WiFi can't be turned off from here. "
+                f"Join {cam.ssid!r} first.",
+                file=sys.stderr,
+            )
+            return 1
+        if identity is wifi.Identity.UNKNOWN:
+            print(f"  (can't confirm this is {cam.name}'s network — taking your word for it)")
+
+    with CameraClient(cam.camera_host) as client:
+        if not client.wait_until_ready(timeout=_ALREADY_ON_PATIENCE_SECS):
+            print(f"{cam.name} is not answering — its WiFi is already off.")
+            return 0
+        client.power_off()
+    print(f"{cam.name}: WiFi off.")
+    return 0
 
 
 def cmd_wake(args: argparse.Namespace) -> int:
@@ -2072,6 +2144,7 @@ def build_parser() -> argparse.ArgumentParser:
     ble               scan for nearby BLE devices
     wifi              scan for nearby WiFi networks
     wake, w           wake a camera's WiFi over BLE
+    sleep             turn off the WiFi of the camera you are on
     stats, st         show battery, SD usage, and file counts
     settings          show current camera settings (read-only)
     clock             show raw camera clock response; optionally sync to UTC
@@ -2113,6 +2186,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_wake = sub.add_parser("wake", aliases=["w"], help="wake a camera's WiFi over BLE")
     p_wake.add_argument("name", help="camera name (from `bd cameras`)")
     p_wake.set_defaults(func=cmd_wake)
+
+    p_sleep = sub.add_parser("sleep", help="turn off the WiFi of the camera you are on")
+    p_sleep.add_argument(
+        "name", nargs="?", help="camera name (default: the one whose network this Mac is on)"
+    )
+    p_sleep.set_defaults(func=cmd_sleep)
 
     p_helper = sub.add_parser(
         "helper",
@@ -2196,9 +2275,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip BLE+auto-join; prompt you to join each AP yourself",
     )
     p_sync.add_argument(
-        "--keep-awake",
+        "--power-off",
         action="store_true",
-        help="don't power the camera's WiFi off when done",
+        help="power each camera's WiFi off when done (default: leave it up for the next command)",
     )
     p_sync.add_argument(
         "--scan-timeout",

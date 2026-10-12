@@ -83,6 +83,7 @@ bushdump ble              # read-only: live-list nearby BLE devices
 bushdump wifi             # read-only: live-list WiFi networks
 bushdump wake frontgate   # wake the camera's WiFi without syncing
 bushdump keepalive frontgate  # keep the camera's WiFi awake until Ctrl+C
+bushdump sleep            # turn off the WiFi of the camera you're on
 bushdump --help           # all commands and flags
 ```
 

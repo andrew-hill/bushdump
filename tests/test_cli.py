@@ -210,7 +210,7 @@ def test_sync_warns_on_corrupt_download(tmp_path, capsys):
 
     args = MagicMock()
     args.manual_wifi = False
-    args.keep_awake = False
+    args.power_off = False
 
     with (
         patch("bushdump.cli._wake_join"),
@@ -257,7 +257,7 @@ def test_sync_retry_rerequests_sidecar_files(tmp_path, capsys):
 
     args = MagicMock()
     args.manual_wifi = False
-    args.keep_awake = False
+    args.power_off = False
     args.retry = True
 
     # Watermark is ahead of the file date so it won't appear in the normal todo
@@ -462,7 +462,7 @@ def test_sync_stops_at_failed_file_without_advancing_watermark(tmp_path, capsys)
 
     args = MagicMock()
     args.manual_wifi = False
-    args.keep_awake = False
+    args.power_off = False
     args.retry = False
 
     state: dict = {}
@@ -502,7 +502,7 @@ def test_sync_failure_message_is_one_line_not_a_traceback(tmp_path, capsys):
 
     args = MagicMock()
     args.manual_wifi = False
-    args.keep_awake = False
+    args.power_off = False
     args.retry = False
 
     with (
@@ -516,6 +516,57 @@ def test_sync_failure_message_is_one_line_not_a_traceback(tmp_path, capsys):
     assert "Traceback" not in err
     assert file.name in err
     assert "Re-run to resume" in err
+
+
+# --- sleep ---
+
+
+def _sleep(argv, *, identity=wifi.Identity.MATCH, current=None, answers=True):
+    """Run `sleep`; return (exit code, client mock)."""
+    client = MagicMock()
+    client.wait_until_ready.return_value = answers
+    client.__enter__ = lambda s: client
+    client.__exit__ = MagicMock(return_value=False)
+    args = cli.build_parser().parse_args(["sleep", *argv])
+    with (
+        patch("bushdump.cli._resolve_camera", return_value=_cam()),
+        patch("bushdump.cli._camera_identity", return_value=identity),
+        patch("bushdump.cli._current_camera", return_value=current),
+        patch("bushdump.config.load_config"),
+        patch("bushdump.camera.CameraClient", return_value=client),
+    ):
+        return args.func(args), client
+
+
+def test_sleep_powers_off_the_named_camera_we_are_on():
+    code, client = _sleep(["gate"])
+    assert code == 0
+    client.power_off.assert_called_once()
+
+
+def test_sleep_refuses_when_on_another_network():
+    code, client = _sleep(["gate"], identity=wifi.Identity.MISMATCH)
+    assert code == 1
+    client.power_off.assert_not_called()
+
+
+def test_sleep_without_a_name_takes_the_camera_we_are_on():
+    code, client = _sleep([], current=_cam())
+    assert code == 0
+    client.power_off.assert_called_once()
+
+
+def test_sleep_without_a_name_needs_a_recognised_network():
+    code, client = _sleep([])
+    assert code == 1
+    client.power_off.assert_not_called()
+
+
+def test_sleep_is_a_no_op_when_no_camera_answers(capsys):
+    code, client = _sleep(["gate"], answers=False)
+    assert code == 0
+    client.power_off.assert_not_called()
+    assert "already off" in capsys.readouterr().out
 
 
 # --- _wake_join short-circuit ---
@@ -536,6 +587,7 @@ def test_wake_join_skips_wake_when_already_on_that_ssid(capsys):
     cam = _ap_camera()
     with (
         patch("bushdump.wifi.observe", return_value=wifi.Observed(networksetup_ssid=cam.ssid)),
+        patch("bushdump.cli._camera_answers", return_value=True),
         patch("bushdump.wifi.join") as join,
         patch("bushdump.cli._wake_and_report") as wake,
     ):
@@ -597,11 +649,12 @@ def _cam(ble_address: str | None = "AAAA-BBBB") -> config.Camera:
     )
 
 
-def _wake_join_with(identities, *, enter=False, wake=None, **kwargs):
+def _wake_join_with(identities, *, enter=False, wake=None, answers=True, **kwargs):
     """Run _wake_join with every radio faked; return the (wake, wait, join) mocks."""
     wake_mock = MagicMock(side_effect=wake or (lambda *a, **k: cli.WakeOutcome.SENT))
     with (
         patch("bushdump.cli._camera_identity", side_effect=identities),
+        patch("bushdump.cli._camera_answers", return_value=answers),
         patch("bushdump.cli._enter_pressed", return_value=enter),
         patch("bushdump.cli._wake_and_report", wake_mock),
         patch("bushdump.helper.current", return_value=None),
@@ -622,6 +675,15 @@ def test_wake_join_does_nothing_when_the_gateway_is_already_this_camera():
     wake, _wait, join = _wake_join_with([wifi.Identity.MATCH])
     wake.assert_not_called()
     join.assert_not_called()
+
+
+def test_a_match_with_no_camera_answering_gets_the_full_wake_and_join(capsys):
+    """The network outlived the AP, so the sources that matched are not asked again."""
+    wake, wait, join = _wake_join_with([wifi.Identity.MATCH] * 9, answers=False)
+    assert wake.call_count == 1
+    assert wait.called
+    assert join.call_count == 1
+    assert "not answering" in capsys.readouterr().out
 
 
 def test_wake_join_stops_once_macos_auto_joins_mid_wake():
