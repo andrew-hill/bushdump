@@ -24,50 +24,16 @@ UART **TX-capable** characteristic (note: *not* the standard NUS RX):
 
 ### AP detection delay — budget ~25s before trusting a "no"
 
-Measured on an E6PMB (2026-08-22, macOS 26): BLE ack at T+0, first positive
-detection via `scanForNetworksWithName_` at ~T+25s.
+Measured on an E6PMB (2026-08-22): BLE ack at T+0, first positive detection of
+the AP from the host at ~T+25s.
 
-**This is detection latency, not radio boot time — the two can't be separated
-with the APIs available.** macOS schedules WiFi scans itself and serves results
-from its own cache, so a negative may mean "the AP isn't up" or merely "macOS
-hasn't rescanned since it came up". In that run the two negatives (T+6s, T+9s)
-returned essentially instantly, while the positive took ~13s inside the call —
-consistent with the negatives being cache reads and only the last being a real
-scan. So the older "~1–2 seconds after the OK" figure is *not* contradicted by
-this data; the AP may well have been up long before we could see it.
-
-**~25s is nonetheless the number to code against.** Whatever the split between
-camera and host, that is the realistic macOS-to-camera round trip from wake
-command to usable detection, and a client has to tolerate it. A negative scan
-result is weak evidence for ~25s after a wake, so don't re-wake or give up on
-the strength of one. Poll, and let the join attempt be the real arbiter.
-
-**To measure the true boot delay** you'd need a path that doesn't go through the
-scan cache — e.g. attempt `networksetup -setairportnetwork` immediately after the
-ack and time how long until it associates. Not yet done.
-
-### Directed-scan throttling — expect unknowns between real answers
-
-Measured off-site at bushdump's own 3s poll interval (macOS 26, 2026-08-24),
-scanning for a *configured camera's* SSID while that camera was out of range:
-
-| poll | in-call | result |
-|------|---------|--------|
-| 1 | ~7s | definite `False` |
-| 2–4 | ~0s | `Resource busy` (`NSPOSIXErrorDomain` 16) |
-| 5 | ~7s | definite `False` |
-| 6–8 | ~0s | `Resource busy` |
-
-**A real scan takes ~7s and answers; the next ~3 polls are throttled and answer
-nothing.** Roughly two thirds of polls come back unknown, so a caller that reads
-a run of unknowns as a verdict will be wrong most of the time. Poll through them
-and keep the last definite answer.
-
-**Do not benchmark this with a made-up SSID.** A name macOS considers
-implausible returns instantly from cache without triggering a radio scan, and so
-never throttles — 99/99 clean over 300s in that configuration, which looks like
-"throttling isn't real" and is purely an artefact of the name. Only a scan for a
-name macOS will actually go looking for exercises the rate limiter.
+That figure is the host's detection latency, not the radio's boot time — the
+two could not be separated, and the AP may well have been up within a second or
+two of the `OK`. **~25s is nonetheless the number to code against.** A negative
+scan result is weak evidence for that long after a wake, so don't re-wake or
+give up on the strength of one. Poll, and let the join attempt be the real
+arbiter. Why the host's scans behave this way is in
+[`macos.md`](macos.md) under "Scanning".
 
 ### The ack is one-directional evidence
 

@@ -56,9 +56,9 @@ permission to the terminal). So:
 
 None of this is a correctness problem, so don't "fix" a missing source by
 assuming its answer — an unrecognised network always gets the full wake+join.
-Don't bring back the gateway MAC either: `arp` is empty on 27. See the macOS
-sections of `TODO.md` for what is and isn't redacted, and `docs/camera-api.md`
-for the measurements behind the timeouts.
+Don't bring back the gateway MAC either: `arp` is empty on 27. See
+`docs/macos.md` for what is and isn't redacted and how scans and joins behave,
+and `docs/camera-api.md` for the camera-side timings.
 
 ## Commands
 
@@ -70,6 +70,7 @@ uv sync                                    # install deps into .venv (first-time
 bushdump ble                               # live-list nearby BLE devices
 bushdump wifi                              # live-list WiFi networks
 bushdump wake <name>                       # wake a configured camera's WiFi over BLE
+bushdump sleep [name]                      # turn off the WiFi of the camera you are on (never wakes one)
 bushdump register                          # guided: register a camera (pick from live lists)
 bushdump cameras                           # show configured cameras
 bushdump stats <name>                      # battery, SD usage, file counts
@@ -77,6 +78,7 @@ bushdump ls <name>                         # preview which files would be downlo
 bushdump sync                              # scan and sync every nearby configured camera
 bushdump sync frontgate                    # sync just one camera
 bushdump sync --manual-wifi                # skip auto WiFi; prompt you to join each AP
+bushdump sync --power-off                  # turn each camera's WiFi off when done (default: left up)
 bushdump stats <name> --joined             # already on the camera's WiFi: skip wake+join
 bushdump helper install                    # build + install the app that reads WiFi names (macOS 26+)
 bushdump helper status                     # is it installed and allowed? which network are we on?
@@ -98,10 +100,11 @@ uv run ruff format .                       # format
 - `bushdump/backup.py` — pure backup watermark logic: `date_from_name`, `parse_rsync_pending`, `media_names_of_kind`, `safe_watermark`, `advance_watermark`
 - `bushdump/prune.py` — prune candidate logic: `classify_for_prune`, `cutoffs_by_media` (per-type cutoff), `scan_local_dir`, `parse_cutoff`; dataclasses `LocalFile`, `PruneVerdict`
 - `bushdump/config.py` — multi-camera config (`[cameras.<name>]`) + per-camera sync state (`state.json`) + backup watermarks (`backups.json`)
-- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `wake`, `helper`, `identify`, `stats`, `settings`, `clock`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`, `completions`); orchestrates the flows
+- `bushdump/cli.py` — subcommands (`cameras`, `ble`, `wifi`, `wake`, `sleep`, `helper`, `identify`, `stats`, `settings`, `clock`, `ls`, `keepalive`, `register`, `sync`, `backup`, `prune`, `completions`); orchestrates the flows
 - `tests/` — pytest; pure logic only, no real camera/BLE/WiFi needed
 - `docs/camera-api.md` — the reverse-engineered camera API reference
 - `docs/camera-models.md` — registry of which models have been confirmed against `camera-api.md`
+- `docs/macos.md` — what macOS does with WiFi and Bluetooth that the code works around: redaction per version, `ProfileID`, scan throttling, join and auto-join behaviour
 - `tools/` — standalone diagnostic scripts (`inspect-ble`, `wake`, `probe-http`, `probe-ssid-sources`, `probe-wifi-join`, `validate-files`) for adding a new model or stepping through the BLE/WiFi/HTTP flow manually; see `tools/README.md`
 - `scratch/` — gitignored scratch space for logs, terminal output, temp notes, code-review output, etc. Everything inside is ignored. Check here for context notes the user may have left.
 
@@ -123,14 +126,20 @@ matches configured cameras by stored address → sync each of the rest. `sync <n
 camera: BLE wake → join AP (retries until up, or gives up early when BLE saw no
 camera *and* no AP) → **poll** camera HTTP until ready
 → per media type list+paginate, download files newer than the
-saved watermark → save watermark → power off camera WiFi. We do **not**
+saved watermark → save watermark. The camera's WiFi is left up, so a `prune`
+or `stats` straight after needs no wake, and the camera turns it off itself
+once idle; `--power-off` turns it off at the end instead, and `sleep` does it
+on demand. We do **not**
 auto-restore your normal WiFi — the laptop stays on the (last) camera's AP; you
 rejoin your usual network yourself. Races are handled by polling, not fixed
 sleeps. `--manual-wifi` swaps BLE+auto-join for a "join the AP, press Enter" prompt.
 
 The wake+join is skipped whenever `wifi.identify` says we are already on that
 camera's network — at the start, or part-way through if macOS auto-joins while
-we are still waking. Enter cuts the current wait short. `--joined` (any camera
+we are still waking. A match at the start only counts if a camera answers
+over HTTP: macOS goes on reporting a network after its AP has gone, so a
+match with nothing answering gets the full wake+join. Enter cuts the current
+wait short. `--joined` (any camera
 command) skips it on your say-so, refusing only a network known to be something
 else; `prune` additionally refuses unless it is positively this camera's.
 
@@ -215,3 +224,8 @@ timing quirks, power-off behaviour, etc. When updating these docs:
   (SSIDs like `CAM8Z8_<mac>`, BLE peripheral names like `CAM8Z8_<loc>_G_E6PMB`).
 - **Omit**: user-assigned camera names (`east`, `norw`), local directory paths,
   specific physical locations, and any personal information.
+
+What macOS does — redaction, scanning, joining, Bluetooth ids — goes in
+`docs/macos.md`, not in the camera docs and not in `TODO.md`. Same rules on
+what to use and omit. It describes current behaviour: correct an entry in place
+rather than appending the newer measurement beside it.

@@ -122,8 +122,7 @@ out of scope for this tool suite.
 
 Two extra tools for the SSID-redaction problem: macOS 26 hides network names
 from every scanning API, so the usual "find the camera's AP in a list" approach
-stopped working. See the macOS 26 section of [`../TODO.md`](../TODO.md) for the
-background.
+stopped working. See [`../docs/macos.md`](../docs/macos.md) for the background.
 
 ### `probe-ssid-sources.py` — find the SSID without a scan
 
