@@ -61,6 +61,8 @@ class Camera:
     output_dir: Path
     ble_address: str | None = None
     expect_ext_power: bool = False
+    # ProfileID macOS shows while joined to this camera's AP; see `wifi.identify`.
+    profile_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -99,6 +101,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
             output_dir=output_dir,
             ble_address=section.get("ble_address") or None,
             expect_ext_power=bool(section.get("expect_ext_power", False)),
+            profile_id=section.get("profile_id") or None,
         )
 
     backup_data = data.get("backup", {})
@@ -145,6 +148,39 @@ def add_camera(
         raise ValueError(f"A camera named {name!r} is already in {path}")
     with path.open("a") as fh:
         fh.write(_camera_section(name, ble_address=ble_address, ssid=ssid, password=password))
+
+
+def with_camera_key(text: str, name: str, key: str, value: str) -> str:
+    """Return config `text` with `key = value` set in `[cameras.<name>]`.
+
+    A line edit rather than a parse-and-rewrite, so the comments and layout of a
+    hand-maintained file survive.
+    """
+    lines = text.split("\n")
+    header = f"[cameras.{_toml_key(name)}]"
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == header)
+    except StopIteration:
+        raise ValueError(f"No {header} section in the config") from None
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    setting = f"{key} = {_toml_string(value)}"
+    for i in range(start + 1, end):
+        if re.match(rf"\s*{re.escape(key)}\s*=", lines[i]):
+            lines[i] = setting
+            return "\n".join(lines)
+    last = max(
+        i for i in range(start, end) if lines[i].strip() and not lines[i].lstrip().startswith("#")
+    )
+    lines.insert(last + 1, setting)
+    return "\n".join(lines)
+
+
+def set_camera_key(name: str, key: str, value: str, path: Path = CONFIG_PATH) -> None:
+    """Set one key in a camera's section of the config file."""
+    path.write_text(with_camera_key(path.read_text(), name, key, value))
 
 
 # --- sync state ------------------------------------------------------------

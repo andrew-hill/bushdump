@@ -1,11 +1,13 @@
 """WiFi on macOS: list nearby networks (CoreWLAN) and join an AP.
 
 Listing SSIDs uses CoreWLAN, which Apple gates two separate ways. Location
-Services has always been required to *scan*. Since macOS 26 reading a network's
-*name* additionally needs the restricted `com.apple.developer.networking.wifi-info`
-entitlement, so on Tahoe scans succeed and come back nameless no matter what
-Location is set to — see `REDACTED_HINT`. `diagnose_scan` exists to keep those
-apart, and `ssid_present` works under redaction by asking about one name rather
+Services has always been required to *scan*. Since macOS 26 a network's *name*
+is additionally withheld from any process that does not itself hold Location
+permission — which a command-line tool cannot, as macOS attributes it to the
+terminal. So on 26 and later our own scans succeed and come back nameless; the
+names come from the helper app (`bushdump.helper`) when it is installed, and
+`REDACTED_HINT` says so when it isn't. `diagnose_scan` keeps the two gates
+apart, and `ssid_present` works without either by asking about one name rather
 than reading any.
 
 Joining the camera's AP drops your normal WiFi (the camera AP has no internet);
@@ -15,10 +17,14 @@ done.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
+
+from bushdump import helper
 
 # --- listing networks (CoreWLAN) -------------------------------------------
 
@@ -34,10 +40,9 @@ def corewlan_available() -> bool:
 
 
 REDACTED_HINT = (
-    "macOS is hiding WiFi network names from this process. Since macOS 26 that "
-    "needs Apple's `com.apple.developer.networking.wifi-info` entitlement, which "
-    "requires a provisioning profile we don't have — Location permission alone is "
-    "not enough. Join the AP from the macOS WiFi menu and enter the SSID manually."
+    "macOS is hiding WiFi network names from this process — since macOS 26 only an "
+    f"app with Location permission may read them. Run {helper.INSTALL_HINT} once to "
+    "install one bushdump can ask, or enter the SSID by hand."
 )
 
 
@@ -146,9 +151,22 @@ def _scan_raw() -> tuple[int | None, list[str]]:
         seen = _seen_from_scan(powered, err is not None, len(cached))
         if seen is None:
             return None, []
-        return seen, [n.ssid() for n in cached if n.ssid()]
+        return seen, _scan_names([n.ssid() for n in cached if n.ssid()], seen, helper.scan)
     except Exception:
         return None, []
+
+
+def _scan_names(
+    readable: list[str], seen: int | None, ask_helper: Callable[[], list[str] | None]
+) -> list[str]:
+    """The names for one scan: ours if macOS gave any, otherwise the helper's.
+
+    Under redaction a scan sees plenty of networks and names none of them, and
+    that is the only time the helper is worth the few seconds its own scan takes.
+    """
+    if readable or not seen:
+        return readable
+    return ask_helper() or []
 
 
 _CAMERA_SSID_HINTS = ("cam8z8", "trail cam")
@@ -215,7 +233,25 @@ def watch_ssids(
     )
 
 
-def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bool | None:
+def _sleep_unless(stop: Callable[[], bool] | None, seconds: float, step: float = 0.5) -> bool:
+    """Sleep for `seconds`, checking `stop` every `step`. True if it cut the sleep short."""
+    if stop is None:
+        time.sleep(seconds)
+        return False
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        if stop():
+            return True
+        time.sleep(min(step, remaining))
+    return False
+
+
+def wait_for_ssid(
+    ssid: str,
+    timeout: float = 40.0,
+    interval: float = 3.0,
+    stop: Callable[[], bool] | None = None,
+) -> bool | None:
     """Poll until `ssid` is in range. True / False / None ("couldn't tell").
 
     The old version listed every SSID and looked for a match, which on macOS 26
@@ -231,6 +267,10 @@ def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bo
     — so treating "we saw an unknown at some point" as the verdict discarded
     every definite answer that came with it, and this returned "couldn't tell"
     for a camera it had confirmed absent three times over.
+
+    `stop` ends the wait early with whatever verdict the polls so far support.
+    It is checked between scans, not during one, so a real ~7s scan still runs
+    to completion before the wait gives way.
     """
     deadline = time.monotonic() + timeout
     answered = False
@@ -240,9 +280,8 @@ def wait_for_ssid(ssid: str, timeout: float = 40.0, interval: float = 3.0) -> bo
             return True
         if present is False:
             answered = True
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline or _sleep_unless(stop, interval):
             return False if answered else None
-        time.sleep(interval)
 
 
 # --- joining / leaving an AP (networksetup) --------------------------------
@@ -277,10 +316,9 @@ def parse_current_ssid(stdout: str) -> str | None:
     """Pull the SSID out of `networksetup -getairportnetwork` output.
 
     None when the line is not a network name at all — not associated, or an
-    error. Under macOS 26 the name comes back as a placeholder rather than the
-    real SSID; that needs no detection here, because the only caller compares
-    the result against a configured SSID and a placeholder simply fails to
-    match, falling through to the full wake+join.
+    error. macOS 26 puts a placeholder where the name should be and 27 reports
+    "not associated" while joined; neither needs detecting here, because
+    `identify` only believes a name that equals the SSID it was looking for.
     """
     line = stdout.strip()
     prefix = "Current Wi-Fi Network: "
@@ -288,11 +326,10 @@ def parse_current_ssid(stdout: str) -> str | None:
 
 
 def current_ssid(interface: str | None = None) -> str | None:
-    """The SSID we are associated with, or None. See `parse_current_ssid`.
+    """The SSID `networksetup` says we are on, or None. See `parse_current_ssid`.
 
-    Readable on macOS 15 and redacted on 26, which is why this answers a
-    question — "are we already on the camera's AP?" — that `ssid_present`
-    cannot: that one proves an AP is in the air, not that we are joined to it.
+    Truthful on macOS 15 only, so callers may believe a name that matches what
+    they expected and nothing else — see `identify`.
     """
     try:
         iface = interface or find_wifi_interface()
@@ -324,8 +361,13 @@ def join(
     interface: str | None = None,
     timeout: float = 30.0,
     interval: float = 2.0,
-) -> None:
-    """Join the AP, retrying until success or `timeout` (handles the AP-boot race)."""
+    stop: Callable[[], bool] | None = None,
+) -> bool:
+    """Join the AP, retrying until success or `timeout` (handles the AP-boot race).
+
+    True once joined. False when `stop` ended the retries first — the caller
+    asked us to give up waiting, so that is not an error here.
+    """
     iface = interface or find_wifi_interface()
     deadline = time.monotonic() + timeout
     last_err = ""
@@ -336,7 +378,96 @@ def join(
             text=True,
         )
         if join_succeeded(result.returncode, result.stdout):
-            return
+            return True
         last_err = (result.stdout + result.stderr).strip()
-        time.sleep(interval)
+        if _sleep_unless(stop, interval):
+            return False
     raise RuntimeError(f"Failed to join {ssid!r} within {timeout:.0f}s: {last_err}")
+
+
+# --- identifying the network we are joined to -------------------------------
+#
+# Three sources, tried best-first, because what macOS will tell a command-line
+# process about its own WiFi network shrinks every release:
+#
+# - `networksetup` names the network on macOS 15. On 26 it returns a
+#   placeholder and on 27 claims we are not associated, so it is only ever
+#   believed when it names the camera — any other answer says nothing.
+# - The helper app (`bushdump.helper`) holds the Location permission a CLI
+#   cannot, and names the network on 26 and 27. When it answers, it is the truth.
+# - `ProfileID`, a token in the dynamic store that macOS keeps per saved network
+#   (measured on 27.0.1: constant across rejoins, different per network). It
+#   names nothing, so it only helps once `bushdump identify` has recorded which
+#   one is the camera's.
+
+
+class Identity(Enum):
+    """Whether the network we are on is a given camera's."""
+
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class Observed:
+    """What each source said about the network we are on; None where it couldn't."""
+
+    networksetup_ssid: str | None = None
+    helper: helper.Reply | None = None
+    profile_id: str | None = None
+
+
+def parse_profile_id(stdout: str) -> str | None:
+    """Pull `ProfileID` out of `scutil`'s AirPort state; None when not joined."""
+    match = re.search(r"^\s*ProfileID\s*:\s*([0-9a-fA-F]{16,})\s*$", stdout, re.MULTILINE)
+    return match.group(1).lower() if match else None
+
+
+def current_profile_id(interface: str | None = None) -> str | None:
+    """The saved-network token for the WiFi network we are joined to, or None."""
+    try:
+        iface = interface or find_wifi_interface()
+        result = subprocess.run(
+            ["scutil"],
+            input=f"show State:/Network/Interface/{iface}/AirPort\n",
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    return parse_profile_id(result.stdout)
+
+
+def observe() -> Observed:
+    """Ask every source which network we are on."""
+    return Observed(
+        networksetup_ssid=current_ssid(),
+        helper=helper.current(),
+        profile_id=current_profile_id(),
+    )
+
+
+def identify(ssid: str, recorded_profile: str | None, seen: Observed) -> Identity:
+    """Is the network we are on the camera's, whose SSID and recorded ProfileID these are?"""
+    if seen.networksetup_ssid == ssid:
+        return Identity.MATCH
+    if seen.helper is not None:
+        return Identity.MATCH if seen.helper.ssid == ssid else Identity.MISMATCH
+    if recorded_profile and seen.profile_id:
+        return Identity.MATCH if seen.profile_id == recorded_profile else Identity.MISMATCH
+    return Identity.UNKNOWN
+
+
+def profile_to_record(ssid: str, recorded_profile: str | None, seen: Observed) -> str | None:
+    """The ProfileID worth saving for this camera right now, or None.
+
+    Only when the helper itself names the camera's network: recording is what
+    the fallback later trusts blindly, so it takes the one source that cannot be
+    wrong about which network this is.
+    """
+    if seen.helper is None or seen.helper.ssid != ssid:
+        return None
+    if not seen.profile_id or seen.profile_id == recorded_profile:
+        return None
+    return seen.profile_id

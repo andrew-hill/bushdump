@@ -3,6 +3,12 @@
 - [ ] Add more graceful error handling to avoid large trace outputs from reasonably
       expected issues.
 - [ ] Bring MP4 validation in line with JPEG validation.
+- [ ] Sync and prune in one run. A plain `bd sync` over two cameras leaves the
+      first one idle long enough to drop its WiFi before the second finishes,
+      so pruning it afterwards costs another wake. Pruning each camera while
+      still on it would avoid that. Open question: where the typed
+      `DELETE <count>` confirmation goes in a multi-camera run, since none of
+      prune's guards may be weakened to fit.
 - [ ] Improve JPEG pixel-corruption detection: `corrupt-scan-zeros.jpg` and
       `corrupt-scan-flip.jpg` in `tests/fixtures/corrupt-jpegs/` currently pass
       validation because libjpeg's error concealment fills in corrupted MCUs with
@@ -72,14 +78,31 @@ any `httpx.TransportError` four times. Nothing here has met a real camera.
       previous watermark was skipped.
 - [ ] A stopped run must report the files it did save. The old code printed
       `Done — 0 new file(s)` after saving 82.
-- [ ] `Already on '<ssid>' — skipping wake+join` should **not** appear on Tahoe.
-      If it does, `networksetup -getairportnetwork` is not redacted after all,
-      the short-circuit works on 26 too, and the "join first, then probe" item
-      below is half solved. Worth one `bd stats <name>` while already on the AP
-      to check deliberately.
-- [ ] While joined, run `arp -n 192.168.8.1` and compare the gateway MAC to the
-      MAC in the SSID — the identity check that would let the short-circuit work
-      under redaction. See the `_wake_join` item under "Code".
+
+### Wake/join fast path
+
+Left over from the 2026-10-12 site run (helper installed, macOS 27.0.1):
+
+- [ ] `bd stats <name> --joined` and `bd prune <name> --joined` on the right
+      AP (only the refusals were run), and `bd stats <name> --joined` from the
+      home network, which must refuse.
+- [ ] With the helper installed but switched off under Location Services,
+      `bd stats <name>` on the AP should still skip the wake+join from the
+      recorded ProfileID. Only a helper that was absent altogether was tried.
+- [ ] Does a `ProfileID` survive forgetting and re-saving the network? If not,
+      `identify` again is the fix; record the answer in `docs/macos.md`.
+
+New 2026-10-12, never run against hardware:
+
+- [ ] Right after `bd sync <name> --power-off` finishes, run `bd stats <name>`.
+      It should say the camera is not answering and wake it, where before it
+      skipped the wake and gave up.
+- [ ] `bd sync` with no flag, then `bd prune <name>` straight away: no wake,
+      and the closing line says the camera's WiFi is still up.
+- [ ] `bd sleep` while on a camera's AP: the AP drops at once. Then again
+      with nothing answering: it should say the WiFi is already off.
+- [ ] Plain `bd sync` across both cameras with neither powered off: the second
+      camera's join must hold while the first one's AP is still in range.
 
 ### `bd sync --retry`
 
@@ -102,6 +125,11 @@ any `httpx.TransportError` four times. Nothing here has met a real camera.
       an unexpected shape — clock check should be silently skipped, not fatal.
 
 **Clock-sync bands**
+- [ ] A sync on the E8 2.0 Pro printed `Camera clock was 7s behind — synced.`
+      then a bare `Clock set.` with no `Residual drift` figure, and the clock
+      was still 7s behind minutes later (2026-10-12). The next sync's set
+      reported `Residual drift: 0s` and held. Find the path that reports
+      success without reading the clock back.
 - [ ] Large drift (≥ threshold): warn + prompt appears; decline it (or let it time out)
       and confirm the end-of-sync re-warn fires before power-off.
 - [ ] `bd clock <name> --sync`: the set lands within ~1s of laptop time (not your
@@ -133,78 +161,17 @@ be its own errand. Don't expect either to fall out of a routine sync.
 - [ ] review output of `bd settings` (raw log on file: `bd-settings-norw.log`;
       `/cmd/getParaSetting` shows valid values for each field)
 
-## macOS 26 (Tahoe) SSID redaction
+## macOS WiFi
 
-macOS 26 redacts WiFi SSIDs from any process lacking Apple's restricted
-`com.apple.developer.networking.wifi-info` entitlement (needs a provisioning
-profile from a paid developer account; ad-hoc signing it gets the process
-SIGKILLed by AMFI). Location authorization is necessary but **not** sufficient —
-confirmed with `authorizedAlways` plus a live location fix, SSIDs still null.
-`sudo` does not bypass it, and `system_profiler` is redacted too. Not an
-Apple-silicon issue; it's the OS version.
+Background for these is in `docs/macos.md`.
 
-**The workaround**: CoreWLAN still *filters* by name even though it won't
-report one — `scanForNetworksWithName_("G")` returns 2 hits, a bogus name
-returns 0. So we can ask "is this AP present?" without ever reading a name.
-Presence is three-state (present / absent / unknown) because a scan can come
-back `Resource busy` — and unknown must never be read as absent. Unknowns are
-the *common* case, not a rarity: measured off-site 2026-08-24 at the real 3s
-interval, a genuine scan takes ~7s and answers, then the next ~3 polls throttle,
-giving ~2/3 unknown overall. The earlier "no busy at 3s on site" reading came
-from scanning for an implausible name, which macOS answers from cache without
-ever scanning — see "Directed-scan throttling" in `docs/camera-api.md`. So poll
-through unknowns and keep the last definite answer; never let a run of them
-become the verdict.
-
-Also unredacted: `networksetup -listpreferredwirelessnetworks` (saved networks,
-no admin needed), the "Could not find network X" error from
-`-setairportnetwork`, WiFi power state, and BLE.
-
-### Code
-
-- [ ] `register` — offer saved networks as a pick-list (camera-likely first),
-      plus join-and-diff to detect a brand-new camera. Live SSID listing can't
-      work under redaction. Where the BLE module programs System ID, derive the
-      SSID from GATT instead (see `docs/camera-api.md`). The pick-list source is
+- [ ] `register` without the helper app — offer saved networks as a pick-list
+      (camera-likely first), plus join-and-diff to detect a brand-new camera.
+      With the helper the live list works again, so this only matters where it
+      isn't installed. Where the BLE module programs System ID, derive the SSID
+      from GATT instead (see `docs/camera-api.md`). The pick-list source is
       `networksetup -listpreferredwirelessnetworks <iface>`, which macOS 26 does
-      not redact; `wifi.saved_ssids()` wrapped it but was deleted as dead code,
-      so rebuild it here when this lands.
-- [ ] `_wake_join` always wakes+joins now. The old "already reachable, skip
-      wake+join" short-circuit probed `camera_host`, which every camera answers
-      on (`192.168.8.1:8080` for all of them), so it could take camera A for
-      camera B and file A's photos under B. Joining by SSID is what actually
-      identifies a camera. If the extra BLE wake grates on site, reorder rather
-      than restore: join first (identity), then probe, and skip the wake when
-      the camera already answers.
-
-      **Failed-join cost measured** (off-site, 2026-08-24, stale BLE address so
-      the camera is unreachable): `bd sync <name>` takes **208s** before it
-      gives up — 3×20s BLE scans + 3×15s AP-boot checks + 40s final wait + 45s
-      join. Every BLE attempt returned the conclusive "device not found within
-      20s", and `_wake_and_report` swallows that into a bare `False`, so the
-      full ladder runs for a camera BLE never saw.
-
-      **Early bail done 2026-08-24** — `_wake_and_report` now returns a
-      `WakeOutcome`, and `_wake_join` gives up when BLE completed a scan without
-      seeing the camera *and* its AP is definitely absent, from the second
-      attempt on. An out-of-range `bd sync <name>` went 208s → 61s, measured.
-      Still to do here: **join first, then probe**, so a command run while
-      already on the right camera's AP skips the wake entirely. That is the
-      other half of this item and is untouched.
-
-      **The redundant wake+join is not disruptive** (on site, 2026-09-06):
-      `bd stats east` run in a second terminal, while a sync was downloading
-      over east's AP in the first, neither dropped the sync nor stalled it —
-      one file of 858 dipped below 1 MB/s in that run, against 1.9 MB/s
-      average. So `networksetup -setairportnetwork` against the SSID you are
-      already on looks like a no-op rather than a re-association, and this item
-      is a time saving only. Nothing here has to be fixed before a concurrent
-      command is safe.
-
-      An identity check that needs no rejoin, untested: SSIDs carry the WiFi
-      MAC (`CAM8Z8_<mac>`), so `arp -n 192.168.8.1` after joining should
-      name the device with no entitlement involved. Worth one check on site
-      that the gateway MAC really does match the SSID's.
+      not redact.
 - [ ] Spike the AT command set over BLE UART for a WiFi-status query — would let
       us poll wake state without any WiFi scan. **Writes to the camera**: query
       forms only, never the `=` setter, deny-list RST/RESTORE/RESET/DEFAULT/

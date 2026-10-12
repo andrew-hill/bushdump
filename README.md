@@ -83,13 +83,22 @@ bushdump ble              # read-only: live-list nearby BLE devices
 bushdump wifi             # read-only: live-list WiFi networks
 bushdump wake frontgate   # wake the camera's WiFi without syncing
 bushdump keepalive frontgate  # keep the camera's WiFi awake until Ctrl+C
+bushdump sleep            # turn off the WiFi of the camera you're on
 bushdump --help           # all commands and flags
 ```
 
 > **macOS permissions:** the first BLE use prompts for Bluetooth access (approve
-> it). Listing WiFi networks needs Location Services. On macOS 26 the list comes
-> back empty even with Location switched on — the OS no longer tells apps what
-> networks are called — so `register` asks you to type the SSID instead.
+> it). Listing WiFi networks needs Location Services. Since macOS 26 the OS also
+> hides what networks are called from command-line tools, so `bushdump wifi`
+> comes back empty and `register` asks you to type the SSID.
+>
+> `bushdump helper install` fixes that. It builds a small app,
+> `~/Applications/BushDumpWiFiHelper.app`, that macOS *will* tell network names
+> to once you allow it Location access, and bushdump asks it. It needs Xcode's
+> command line tools. Besides bringing the lists back, it lets bushdump notice
+> when you are already on a camera's WiFi and skip the wake and join. Without
+> it, `bushdump identify <name>` gets most of that second benefit by recording
+> an id macOS keeps for the camera's network.
 
 > **Moving to a new Mac:** re-run `bushdump register` for each camera. macOS
 > identifies a Bluetooth device by an id it assigns per computer rather than by
