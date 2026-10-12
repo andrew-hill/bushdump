@@ -33,16 +33,6 @@ mean "already awake" — is refuted, and the `_wake_join` early bail is unblocke
 ### `bd backup` / `bd prune`
 
 **Backup happy path**
-- [ ] Full cycle: `bd sync` → `bd backup` → `bd prune` — confirm each step
-      sees the state left by the prior.  *(needs camera in range)*
-
-      `sync` → `backup` half confirmed 2026-08-24: backup picked up the files
-      that sync had just written and advanced its watermark to exactly the sync
-      watermark on both cameras (`2026-08-23 09:50:01` and
-      `2026-08-22 17:30:00`), 0 pending, local counts matching the server.
-      The NAS had been 9 days stale at `2026-08-15` before that run.
-      Still to do: the `backup` → `prune` half, which needs a camera in range.
-
 - [ ] Delete the stale `.DS_Store` left in one camera's folder on the NAS. It
       is what the "non-media file on server" warning was reporting (identified
       2026-08-24). New ones no longer propagate, but an rsync `--exclude`
@@ -57,21 +47,17 @@ mean "already awake" — is refuted, and the `_wake_join` early bail is unblocke
       cancelling at the token prompt (Ctrl+C) leaves camera file count unchanged.
 - [ ] Wrong count in `DELETE <count>` token: rejected with a retry prompt,
       nothing deleted.
-- [ ] No backup watermark covering the files to prune: refused.  *(needs camera in range)*
 - [ ] Local size mismatch (local file differs from camera copy): blocks that file.
 - [ ] `.error.txt` sidecar present: blocks pruning that file.
-- [ ] Known-backed-up old file, correct token typed: file disappears from
-      `bd ls`, local copy and `state.json` untouched.
 
-### Dropped downloads (new 2026-09-07, never run against hardware)
+### Dropped downloads
 
 East reset at file 3 of 1053 and timed out at file 83 of 1052 on 2026-09-06,
 each time abandoning the remaining thousand files. `_stream_to_tmp` now retries
-any `httpx.TransportError` four times. Nothing here has met a real camera.
+any `httpx.TransportError` four times, and east synced 336 files without an
+abort on 2026-10-12. A recovered retry prints nothing, so that run cannot show
+whether one fired; the two cases below need a link that actually dies.
 
-- [ ] Sync east — the camera that actually drops. A recovered retry prints
-      nothing, so a clean run *is* the pass: compare against the 0.1 MB/s first
-      file and two aborts in `scratch/2026-09-06 bushdump sync log.txt`.
 - [ ] If `! <file>: ReadError — stopping here. Re-run to resume from this file.`
       appears, four retries were exhausted — a dead link, not a blip. Confirm
       the re-run resumes at that same file and nothing between it and the
