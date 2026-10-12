@@ -3,6 +3,12 @@
 - [ ] Add more graceful error handling to avoid large trace outputs from reasonably
       expected issues.
 - [ ] Bring MP4 validation in line with JPEG validation.
+- [ ] Sync and prune in one run. A plain `bd sync` over two cameras leaves the
+      first one idle long enough to drop its WiFi before the second finishes,
+      so pruning it afterwards costs another wake. Pruning each camera while
+      still on it would avoid that. Open question: where the typed
+      `DELETE <count>` confirmation goes in a multi-camera run, since none of
+      prune's guards may be weakened to fit.
 - [ ] Improve JPEG pixel-corruption detection: `corrupt-scan-zeros.jpg` and
       `corrupt-scan-flip.jpg` in `tests/fixtures/corrupt-jpegs/` currently pass
       validation because libjpeg's error concealment fills in corrupted MCUs with
@@ -80,8 +86,6 @@ Left over from the 2026-10-12 site run (helper installed, macOS 27.0.1):
 - [ ] `bd stats <name> --joined` and `bd prune <name> --joined` on the right
       AP (only the refusals were run), and `bd stats <name> --joined` from the
       home network, which must refuse.
-- [ ] Press Enter during the BLE scan, the AP wait and the join in turn. Each
-      should move on at once; a real WiFi scan in flight (~7s) finishes first.
 - [ ] With the helper installed but switched off under Location Services,
       `bd stats <name>` on the AP should still skip the wake+join from the
       recorded ProfileID. Only a helper that was absent altogether was tried.
@@ -161,8 +165,6 @@ be its own errand. Don't expect either to fall out of a routine sync.
 
 Background for these is in `docs/macos.md`.
 
-- [ ] Run `BushDumpWiFiHelper` on macOS 26, and one `bd stats <name>` on
-      macOS 15. Every measurement behind the helper is from 27.
 - [ ] `register` without the helper app — offer saved networks as a pick-list
       (camera-likely first), plus join-and-diff to detect a brand-new camera.
       With the helper the live list works again, so this only matters where it
